@@ -1,0 +1,35 @@
+# config/config.yaml
+project:
+  name: "InvestAdvisor_fdu_bigData_2025"
+  author: "Feng Mengchu @fdu_25210690088"
+  project_dir: "/root/nas-private/bigdata_final_project"
+
+# LLM 和 Embedding 模型配置
+llm:
+  model_name: "Qwen2.5-7B-Instruct"
+  model_dir: "models/Qwen2.5-7B-Instruct"
+  cache_dir: "models/huggingface_cache"
+  context_window: 8192
+  max_new_tokens: 1024
+  max_memory_map: "{0: '15GiB'}"
+  temperature: 0.6
+  topk: 50
+  do_sample: True
+
+embedding:
+  model_name: "bge-small-zh-v1.5"
+  model_dir: "models/bge-small-zh-v1.5"
+  cache_dir: "models/huggingface_cache"
+
+# RAG参数
+rag:
+  chunk_size: 512
+  chunk_overlap: 50
+  similarity_top_k: 3
+  index_persist_dir: "data/storage"
+
+# 路径配置 (使用相对路径)
+paths:
+  raw_data: "data/raw"
+  processed_data: "data/processed"
+  ml_models: "data/trained_models"
