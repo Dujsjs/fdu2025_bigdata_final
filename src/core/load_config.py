@@ -38,8 +38,13 @@ class RAGConfig(BaseModel):
     similarity_top_k: int
     index_persist_dir: str
 
+class financialDataConfig(BaseModel):
+    update_frequency: int
+    rice_quant_uri: str
+
 class PathsConfig(BaseModel):
     raw_data: str
+    financial_data: str
     processed_data: str
     ml_models: str
 
@@ -47,6 +52,7 @@ class AppConfig(BaseModel):
     project: ProjectInfo
     llm: LLMConfig
     embedding: EmbeddingConfig
+    financial_data: financialDataConfig
     rag: RAGConfig
     paths: PathsConfig
 

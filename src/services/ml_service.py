@@ -1,5 +1,3 @@
-# src/services/ml_service.py
-
 import random
 from typing import Dict, Any
 
@@ -12,7 +10,7 @@ class MLService:
 
     def __init__(self):
         # 实际项目中，这里会加载训练好的 ML 模型
-        print("✅ MLService 初始化: 已加载 Mock 模型。")
+        print("初始化 MLService 成功")
 
     def predict(self, amount: float, risk_level: str) -> Dict[str, Any]:
         """

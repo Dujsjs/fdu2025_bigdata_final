@@ -2,10 +2,12 @@ import json
 from llama_index.core.tools import FunctionTool, QueryEngineTool, ToolMetadata
 from src.services.rag_service import RAGService
 from src.services.ml_service import MLService
+from src.services.ricequant_service import RiceQuantService
 
 # 惰性实例化（在需要时才创建服务实例）
 _rag_service = None
 _ml_service = None
+_ricequant_service = None
 
 
 def get_rag_service():
@@ -22,18 +24,22 @@ def get_ml_service():
     return _ml_service
 
 
-# --- 1. RAG 知识检索工具 ---
+def get_ricequant_service():
+    global _ricequant_service
+    if _ricequant_service is None:
+        _ricequant_service = RiceQuantService()
+    return _ricequant_service
 
+
+# --- 1. RAG知识检索类工具 ---
 def get_rag_tool():
     """将 RAGService 提供的查询引擎包装成 LlamaIndex 工具"""
 
     # 在这里调用服务实例化函数
     rag_service = get_rag_service()
     query_engine = rag_service.get_query_engine()
-
     return QueryEngineTool(
         query_engine=query_engine,
-        # ... (metadata 保持不变)
         metadata=ToolMetadata(
             name="investment_rules_knowledge_base",
             description=(
@@ -44,13 +50,10 @@ def get_rag_tool():
     )
 
 
-# --- 2. 机器学习分析工具 ---
-
+# --- 2. 机器学习分析类工具 ---
 def get_ml_tool():
     """将 MLService 的预测功能包装成 LlamaIndex 函数工具"""
-
     ml_service = get_ml_service()
-
     def perform_investment_analysis(amount: float, risk_level: str) -> str:
         # 调用 MLService 的预测方法
         result_dict = ml_service.predict(amount, risk_level)
@@ -66,6 +69,22 @@ def get_ml_tool():
     )
 
 
+# --- 3. 金融数据类工具 ---
+def get_instruments_data_tool():
+    """将 RiceQuantService 的查询合约功能包装成 LlamaIndex 函数工具"""
+    ricequant_service = get_ricequant_service()
+    return FunctionTool.from_defaults(
+        fn=ricequant_service.query_stock_info,
+        name="instruments_info_tool",
+        description=(
+            "用于查询金融合约的基本信息。当用户需要查询金融合约相关信息时，必须调用此工具。"
+            "所需参数："
+            "type: 合约类型，包括CS（股票）、ETF（交易所交易基金）、INDX（指数）、Future（期货）、Option（期权）"
+            "query_by_code: 根据合约代码查询"
+            "query_by_symbol: 根据合约名称查询"
+        )
+    )
+
 def get_all_tools():
     """返回所有可用的工具列表"""
-    return [get_rag_tool(), get_ml_tool()]
+    return [get_rag_tool(), get_ml_tool(), get_instruments_data_tool()]
