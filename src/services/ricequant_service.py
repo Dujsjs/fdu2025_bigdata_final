@@ -10,7 +10,7 @@ import hashlib
 class RiceQuantService:
     def __init__(self):
         rqdatac.init(uri=settings.financial_data.rice_quant_uri)
-        print("初始化 RiceQuantService 成功")
+        print("初始化 RiceQuantService 成功！")
     def _update_instruments(self, type, date=None, market='cn', max_freq=settings.financial_data.update_frequency):
         """
         用于下载/更新合约信息，若在有效期内则无需更新
@@ -172,8 +172,11 @@ class RiceQuantService:
             data = rqdatac.get_price(order_book_ids, start_date=int(start_date_str), end_date=int(end_date_str),
                                     frequency=frequency, fields=fields, adjust_type=adjust_type,
                                     skip_suspended=skip_suspended, expect_df=True, market='cn')
+            data.reset_index(inplace=True)
+            if 'date' in data.columns:
+                data['date'] = pd.to_datetime(data['date']).dt.strftime("%Y/%m/%d")
             if data is not None and not data.empty:
-                data.to_csv(new_file_path)
+                data.to_csv(new_file_path, index=False)
                 print("价格数据下载完成！")
                 return new_file_path
             else:
@@ -208,7 +211,10 @@ class RiceQuantService:
                                        end_date=int(tmp_end_date), frequency=frequency,
                                        fields=fields, adjust_type=adjust_type,
                                        skip_suspended=skip_suspended, expect_df=True, market='cn')
+                tmp_new_data.reset_index(inplace=True)   #重置索引，保证列是统一的
                 new_data = pd.concat([new_data, tmp_new_data], axis=0, ignore_index=True)
+            if 'date' in new_data.columns:
+                new_data['date'] = pd.to_datetime(new_data['date']).dt.strftime("%Y/%m/%d")
             if new_data is not None and not new_data.empty:
                 existing_data = pd.read_csv(existing_file_path)
                 updated_data = pd.concat([existing_data, new_data], axis=0, ignore_index=True)
@@ -229,8 +235,11 @@ class RiceQuantService:
                 data = rqdatac.get_price(order_book_ids, start_date=int(start_date_str), end_date=int(end_date_str),
                                         frequency=frequency, fields=fields, adjust_type=adjust_type,
                                         skip_suspended=skip_suspended, expect_df=True, market='cn')
+                data.reset_index(inplace=True)
+                if 'date' in data.columns:
+                    data['date'] = pd.to_datetime(data['date']).dt.strftime("%Y/%m/%d")
                 if data is not None and not data.empty:
-                    data.to_csv(new_file_path)
+                    data.to_csv(new_file_path, index=False)
                     print("价格数据下载完成！")
                     return new_file_path
                 else:
@@ -287,8 +296,8 @@ if __name__ == '__main__':
     tmp = RiceQuantService()
     # print(tmp.query_stock_info('INDX', query_by_code='000001'))
     # print(tmp._get_instruments_list('CS'))
-    print(tmp._update_price_data('CS'))
-    print(tmp._update_price_data(instru_type='CS', start_date=20251124, end_date=20251128))
+    # print(tmp._update_price_data('CS'))
+    # print(tmp._update_price_data(instru_type='CS', start_date=20251124, end_date=20251128))
     FIELDS_LIST = [
         'close', 'high', 'low', 'total_turnover', 'volume', 'prev_close'
     ]
