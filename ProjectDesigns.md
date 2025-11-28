@@ -54,7 +54,23 @@
 
   * 工程设计
 
-    * 
+    * ML_Pack（将配置、模型等信息打包到一起，**每个类型的合约对应一个实例**，相当于总共最多有5个实例）
+      * 变量部分
+        * config
+          * start_date
+          * end_date
+          * selected_instruments（用户所选定的若干支同类合约）
+          * raw_data_addr（包含了该类型的**所有**合约数据）
+          * features_data_addr（仅包含**用户指定合约**的特征数据，否则数据量过大）
+        * trained_models（只记录模型的地址）
+          * value_analysis_model
+          * risk_analysis_model
+          * return_prediction_model
+      * 函数部分
+        * train_value_analysis_model
+        * train_risk_analysis_model
+        * train_return_prediction_model
+        * refresh_models（若用户指定的合约发生变化则与用户对话，当用户确认需重新训练时调用该函数进行重新训练）
 
 
 

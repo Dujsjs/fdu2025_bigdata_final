@@ -1,11 +1,10 @@
-import random
 import os
 import pandas as pd
 import numpy as np
-from datetime import datetime
 from typing import Dict, List, Optional, Any
 from src.services.ricequant_service import RiceQuantService
 from src.core.load_config import settings
+import hashlib
 
 # class MLPack:   # 将数据、模型、配置（如时间范围、模型参数）封装为一个pack，形成类似“记忆”的功能
 #
@@ -25,12 +24,14 @@ class MLService:
     def construct_contract_features(
             self,
             contract_type: str,
+            order_book_id: [str],
             start_date: str,
             end_date: str,
             prev_contract_data: Optional[pd.DataFrame] = None
     ) -> str:
         """
         构建适用于多种合约类型的全面特征集
+        :param order_book_id: 用户指定的合约代码列表，仅对此部分样本开展特征工程
         :param df: 从get_price获取的原始数据DataFrame
         :param contract_type: 合约类型 ('CS', 'ETF', 'INDX', 'Future', 'Option')
         :param prev_contract_data: 用于期货展期等场景的前序合约数据（可选）
@@ -39,9 +40,13 @@ class MLService:
         df_addr, df_fields = self.ricequant_service.instruments_features_fetching(contract_type, int(start_date), int(end_date))
         df = pd.read_csv(df_addr)
 
-        # 1. 基础数据验证
+        # 1. 基础数据验证并选择合适的样本&按时间排序
         if df.empty:
             raise ValueError("输入数据为空")
+        if order_book_id and 'order_book_id' in df.columns:     # 筛选出order_book_id在给定列表中的行
+            df = df[df['order_book_id'].isin(order_book_id)]
+        if 'date' in df.columns:
+            df = df.sort_values(['order_book_id', 'date'])
 
         # 2. 标准化列名（处理可能的大小写差异）
         df = df.copy()
@@ -218,7 +223,10 @@ class MLService:
                 features['month'] = df.index.month
                 features['quarter'] = df.index.quarter
 
-        output_path = os.path.join(self.features_data_path, f"{start_date}_{end_date}_features_data.csv")
+        if order_book_id:
+            order_book_id_str = ','.join(sorted(order_book_id))
+        order_book_id_hash = hashlib.md5(order_book_id_str.encode('utf-8')).hexdigest()[:10]
+        output_path = os.path.join(self.features_data_path, f"{start_date}_{end_date}_{order_book_id_hash}_features_data.csv")
         features.reset_index(inplace=True)
         if 'index' in features.columns:
             features.drop(columns=['index'], inplace=True)
@@ -284,4 +292,33 @@ class MLService:
 
 if __name__ == '__main__':
     ml_service = MLService()
-    print(ml_service.construct_contract_features('CS', '20250601', '20251128'))
+    cs_list = [
+        "000001.XSHE",
+        "000002.XSHE",
+        "000004.XSHE",
+        "000006.XSHE",
+        "000007.XSHE",
+        "000008.XSHE",
+        "000009.XSHE",
+        "000010.XSHE",
+        "000011.XSHE",
+        "000012.XSHE",
+        "000014.XSHE",
+        "000016.XSHE",
+        "000017.XSHE",
+        "000019.XSHE",
+        "000020.XSHE",
+        "000021.XSHE",
+        "000025.XSHE",
+        "000026.XSHE",
+        "000027.XSHE",
+        "000028.XSHE",
+        "000029.XSHE",
+        "000030.XSHE",
+        "000031.XSHE",
+        "000032.XSHE",
+        "000034.XSHE",
+        "000035.XSHE",
+        "000036.XSHE"
+]
+    print(ml_service.construct_contract_features('CS', cs_list, '20240401', '20251128'))

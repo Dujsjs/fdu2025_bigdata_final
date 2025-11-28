@@ -49,17 +49,17 @@ class RiceQuantService:
 
             # 执行数据更新逻辑
             if (datetime.now() - datetime.strptime(file_date, "%Y%m%d")).days > max_freq:
-                print(f"缓存数据超过{max_freq}天，需要更新")
+                print(f"合约基本信息缓存超过{max_freq}天，需要更新")
                 data = rqdatac.all_instruments(type=type, date=int(current_date_str), market=market)
                 data.to_csv(output_file_path, index=False)
                 os.remove(file_path)
                 print("更新完成！")
                 return output_file_path
             else:
-                print(f"数据已存在且未超过{max_freq}天，无需更新")
+                print(f"合约基本信息缓存已存在且未超过{max_freq}天，无需更新")
                 return file_path
         else:   # 不存在目标类型的文件
-            print("数据不存在，需要下载")
+            print("合约基本信息缓存不存在，需要下载")
             data = rqdatac.all_instruments(type=type, date=int(current_date_str), market=market)
             data.to_csv(output_file_path, index=False)
             print("下载完成！")
