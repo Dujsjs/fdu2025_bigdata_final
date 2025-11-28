@@ -77,7 +77,7 @@ def get_instruments_data_tool():
         fn=ricequant_service.query_stock_info,
         name="instruments_info_tool",
         description=(
-            "用于查询金融合约的基本信息。当用户需要查询金融合约相关信息时，必须调用此工具。"
+            "用于查询当前可交易的金融合约的基本信息。当用户需要查询金融合约相关信息时，必须调用此工具。"
             "所需参数："
             "type: 合约类型，包括CS（股票）、ETF（交易所交易基金）、INDX（指数）、Future（期货）、Option（期权）"
             "query_by_code: 根据合约代码查询"
