@@ -41,36 +41,49 @@
 
     ```mermaid
     graph TD
-    A[数据层] -->|get_price| B[特征层]
-    A -->|get_live_ticks-弃用| B
-    B --> C[价值分析模型]
-    B --> D[风险分析模型]
-    B --> E[收益预测模型]
-    C & D & E --> F[投资建议引擎]
-    F --> G[同类合约对比]
-    F --> H[跨类合约对比]
-    G & H --> I[JSON分析报告]
+    A[合约数据] -->|API：get_price| B[合约特征数据]
+    B -->|CS| C[股票分析]
+    B -->|ETF| D[ETF分析]
+    B -->|INDX| E[指数分析]
+    B -->|Future| F[期货分析]
+    B -->|Option| G[期权分析]
+    C & D & E & F & G --> H[统一分析框架]
+    H --> I[价值分析]
+    H --> J[风险分析]
+    H --> K[收益预测]
+    I & J & K --> L[投资建议]
     ```
 
-  * 工程设计
+  * 工程设计 & 工程优化
 
-    * ML_Pack（将配置、模型等信息打包到一起，**每个类型的合约对应一个实例**，相当于总共最多有5个实例）
-      * 变量部分
+    * MLPack（将配置、模型等信息打包到一起，**每个类型的合约对应一个实例**，相当于总共最多有5个实例）
+      * 变量
         * config
           * start_date
           * end_date
           * selected_instruments（用户所选定的若干支同类合约）
-          * raw_data_addr（包含了该类型的**所有**合约数据）
-          * features_data_addr（仅包含**用户指定合约**的特征数据，否则数据量过大）
-        * trained_models（只记录模型的地址）
+          * addr
+            * raw_data_addr（包含了该类型的**所有**合约数据）
+            * features_data_addr（仅包含**用户指定合约**的特征数据，否则数据量过大）
+            * value_analysis_model_addr
+            * risk_analysis_model_addr
+            * return_prediction_model_addr
+        * trained_models
           * value_analysis_model
           * risk_analysis_model
           * return_prediction_model
-      * 函数部分
-        * train_value_analysis_model
-        * train_risk_analysis_model
-        * train_return_prediction_model
-        * refresh_models（若用户指定的合约发生变化则与用户对话，当用户确认需重新训练时调用该函数进行重新训练）
+      * 方法
+        * _train_value_analysis_model
+        * _train_risk_analysis_model
+        * _train_return_prediction_model
+        * _update_models（若用户指定的合约与训练使用的合约数据不同，则与用户对话，当用户确认需重新训练时调用该函数）
+        * _load_models
+        * _update_pack
+        * do_analysis
+        * save_pack
+    * MLService
+      * _construct_contract_features
+      * do_analysis
 
 
 

@@ -41,6 +41,11 @@ class RAGConfig(BaseModel):
 class financialDataConfig(BaseModel):
     update_frequency: int
     rice_quant_uri: str
+    features: dict
+
+class mlModelConfig(BaseModel):
+    va_para: dict
+    cv_fold: int
 
 class PathsConfig(BaseModel):
     raw_data: str
@@ -54,6 +59,7 @@ class AppConfig(BaseModel):
     embedding: EmbeddingConfig
     financial_data: financialDataConfig
     rag: RAGConfig
+    mlModels: mlModelConfig
     paths: PathsConfig
 
 

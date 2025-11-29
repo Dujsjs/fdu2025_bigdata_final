@@ -1,27 +1,156 @@
 import os
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Any
+from typing import List, Dict, Any, Optional
 from src.services.ricequant_service import RiceQuantService
 from src.core.load_config import settings
 import hashlib
+from dataclasses import dataclass
 
-# class MLPack:   # 将数据、模型、配置（如时间范围、模型参数）封装为一个pack，形成类似“记忆”的功能
-#
+@dataclass
+class MLPackConfig:
+    """
+    MLPack的配置信息，由用户指定
+    """
+    start_date: str
+    end_date: str
+    selected_instruments: List[str]
+
+@dataclass
+class MLPackAddresses:
+    """
+    MLPack中涉及的各种文件地址（绝对地址），MLPack初始化时自动生成
+    """
+    raw_data_addr: str = ""
+    features_data_addr: str = ""
+    value_analysis_model_addr: str = ""
+    risk_analysis_model_addr: str = ""
+    return_prediction_model_addr: str = ""
+
+class MLPack:
+    """
+    MLPack将配置、模型等信息打包到一起，每个类型的合约对应一个实例，
+    相当于总共最多有5个实例 (CS, ETF, INDX, Future, Option)
+    """
+    def __init__(self, contract_type: str, config: MLPackConfig):
+        """
+        初始化MLPack实例
+
+        Args:
+            contract_type: 合约类型 ('CS', 'ETF', 'INDX', 'Future', 'Option')
+            config: MLPack配置信息
+        """
+        # 配置和数据路径信息
+        self.contract_type = contract_type
+        self.config = config
+        self.addr = MLPackAddresses()
+
+        # 训练好的模型
+        self.trained_models = {
+            'value_analysis_model': None,
+            'risk_analysis_model': None,
+            'return_prediction_model': None
+        }
+        if self.addr.value_analysis_model_addr and self.addr.risk_analysis_model_addr and self.addr.return_prediction_model_addr:
+            self._load_models()
+
+        # 数据
+        self.raw_data = None
+        self.features_data = None
+        if self.addr.raw_data_addr:
+            self.raw_data = pd.read_csv(self.addr.raw_data_addr)
+        if self.addr.features_data_addr:
+            self.features_data = pd.read_csv(self.addr.features_data_addr)
+
+        print('MLPack 预加载完成')
+
+    def _train_value_analysis_model(self) -> Any:
+        """
+        训练价值分析模型
+        """
+        pass
+
+    def _train_risk_analysis_model(self) -> Any:
+        """
+        训练风险分析模型
+        """
+        pass
+
+    def _train_return_prediction_model(self) -> Any:
+        """
+        训练收益预测模型
+        """
+        pass
+
+    def _update_models(self, force_retrain: bool = False) -> None:
+        """
+        更新模型（若用户指定的合约与训练使用的合约数据不同，
+        则与用户对话，当用户确认需重新训练时调用该函数）
+
+        Args:
+            force_retrain: 是否强制重新训练
+        """
+        pass
+
+    def _load_models(self) -> None:
+        """
+        加载已训练的模型
+        """
+        pass
+
+    def _update_pack(self, new_config: MLPackConfig) -> None:
+        """
+        更新整个pack的配置和数据
+
+        Args:
+            new_config: 新的配置信息
+        """
+        pass
+
+    def do_analysis(self) -> Dict[str, Any]:
+        """
+        执行完整的分析流程
+
+        Returns:
+            分析结果字典
+        """
+        pass
+
+    def save_pack(self, save_path: str) -> None:
+        """
+        保存整个pack到指定路径
+
+        Args:
+            save_path: 保存路径
+        """
+        pass
+
+    @classmethod
+    def load_pack(cls, load_path: str) -> 'MLPack':
+        """
+        从指定路径加载pack
+
+        Args:
+            load_path: 加载路径
+
+        Returns:
+            MLPack实例
+        """
+        pass
+
 
 class MLService:
     """
     MLService 囊括价值分析模型、风险分析模型、收益预测模型，能调用投资建议引擎分析模型结果
     """
     def __init__(self):
-        # 实际项目中，这里会加载训练好的 ML 模型
         self.ricequant_service = RiceQuantService()
         self.project_path = settings.project.project_dir
         self.models_path = os.path.join(self.project_path, settings.paths.ml_models)
         self.features_data_path = os.path.join(self.project_path, settings.paths.processed_data)
         print("初始化 MLService 成功！")
 
-    def construct_contract_features(
+    def _construct_contract_features(
             self,
             contract_type: str,
             order_book_id: [str],
@@ -32,13 +161,22 @@ class MLService:
         """
         构建适用于多种合约类型的全面特征集
         :param order_book_id: 用户指定的合约代码列表，仅对此部分样本开展特征工程
-        :param df: 从get_price获取的原始数据DataFrame
         :param contract_type: 合约类型 ('CS', 'ETF', 'INDX', 'Future', 'Option')
         :param prev_contract_data: 用于期货展期等场景的前序合约数据（可选）
         :return: 包含所有特征的DataFrame的存储地址
         """
         df_addr, df_fields = self.ricequant_service.instruments_features_fetching(contract_type, int(start_date), int(end_date))
         df = pd.read_csv(df_addr)
+        order_book_id_str = None
+        if order_book_id:
+            order_book_id_str = ','.join(sorted(order_book_id))
+        order_book_id_hash = hashlib.md5(order_book_id_str.encode('utf-8')).hexdigest()[:10]
+        output_path = os.path.join(self.features_data_path, f"{start_date}_{end_date}_{order_book_id_hash}_{contract_type}_features_data.csv")
+        if os.path.exists(output_path):
+            print("特征文件已存在！")
+            return output_path
+        else:
+            print("特征文件不存在，开始生成")
 
         # 1. 基础数据验证并选择合适的样本&按时间排序
         if df.empty:
@@ -46,7 +184,7 @@ class MLService:
         if order_book_id and 'order_book_id' in df.columns:     # 筛选出order_book_id在给定列表中的行
             df = df[df['order_book_id'].isin(order_book_id)]
         if 'date' in df.columns:
-            df = df.sort_values(['order_book_id', 'date'])
+            df = df.sort_values(['date', 'order_book_id'])   # 整体数据优先【按照时间排序】
 
         # 2. 标准化列名（处理可能的大小写差异）
         df = df.copy()
@@ -216,79 +354,12 @@ class MLService:
                 upper_bound = mean + 5 * std
                 features[col] = features[col].clip(lower=lower_bound, upper=upper_bound)
 
-        # 添加时间特征（对季节性分析有用）
-        if not df.index.empty:
-            if isinstance(df.index, pd.DatetimeIndex):
-                features['day_of_week'] = df.index.dayofweek
-                features['month'] = df.index.month
-                features['quarter'] = df.index.quarter
-
-        if order_book_id:
-            order_book_id_str = ','.join(sorted(order_book_id))
-        order_book_id_hash = hashlib.md5(order_book_id_str.encode('utf-8')).hexdigest()[:10]
-        output_path = os.path.join(self.features_data_path, f"{start_date}_{end_date}_{order_book_id_hash}_features_data.csv")
         features.reset_index(inplace=True)
         if 'index' in features.columns:
             features.drop(columns=['index'], inplace=True)
         features.to_csv(output_path, index=False)
         return output_path
 
-    # def
-
-    # def predict(self, amount: float, risk_level: str) -> Dict[str, Any]:
-    #     """
-    #     根据用户输入的结构化参数，返回模拟的投资分析结果。
-    #
-    #     Args:
-    #         amount: 投资金额 (e.g., 50000.0)
-    #         risk_level: 风险等级 (e.g., "low", "medium", "high" 或对应的中文)
-    #
-    #     Returns:
-    #         包含预测结果的字典。
-    #     """
-    #
-    #     # 定义不同风险等级的模拟年化收益率范围 (包含中文和英文映射)
-    #     risk_map = {
-    #         "low": (0.02, 0.05),
-    #         "保守": (0.02, 0.05),
-    #         "medium": (0.06, 0.10),
-    #         "稳健": (0.06, 0.10),
-    #         "high": (0.12, 0.25),
-    #         "激进": (0.12, 0.25),
-    #     }
-    #
-    #     # 统一将输入转为小写以匹配映射表
-    #     level = risk_level.lower()
-    #
-    #     # 处理可能的中文输入
-    #     if "保守" in level or "low" in level:
-    #         level_key = "保守"
-    #     elif "稳健" in level or "medium" in level:
-    #         level_key = "稳健"
-    #     elif "激进" in level or "high" in level:
-    #         level_key = "激进"
-    #     else:
-    #         return {
-    #             "error": "风险等级输入无效",
-    #             "message": "请使用 '保守', '稳健', 或 '激进' (或对应的英文)。",
-    #             "amount": amount
-    #         }
-    #
-    #     min_rate, max_rate = risk_map[level_key]
-    #
-    #     # 模拟生成一个随机年化收益率
-    #     annual_rate = random.uniform(min_rate, max_rate)
-    #
-    #     # 计算一年后的预测收益
-    #     predicted_return = amount * annual_rate
-    #
-    #     return {
-    #         "risk_level_used": level_key,
-    #         "investment_amount": amount,
-    #         "annual_return_rate": round(annual_rate, 4),
-    #         "predicted_one_year_return": round(predicted_return, 2),
-    #         "disclaimer": "此数据为Mock模型生成的模拟预测结果，不构成真实投资建议。"
-    #     }
 
 if __name__ == '__main__':
     ml_service = MLService()
@@ -321,4 +392,4 @@ if __name__ == '__main__':
         "000035.XSHE",
         "000036.XSHE"
 ]
-    print(ml_service.construct_contract_features('CS', cs_list, '20240401', '20251128'))
+    print(ml_service._construct_contract_features('CS', cs_list, '20240401', '20251128'))

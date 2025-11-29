@@ -1,0 +1,342 @@
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+import shap
+from tqdm import tqdm
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_absolute_error, r2_score
+from typing import Dict, List, Union
+from src.core.load_config import settings
+
+class ContractValueAnalysisModel:
+    """
+    通用合约价值分析模型（支持5类合约）
+
+    特点：
+    1. 根据合约类型自动选择特征
+    2. 适配各类合约的特有价值驱动因素
+    3. 输出可解释的价值评分（0-100）
+    """
+
+    def __init__(self):
+        # 合约类型特定参数
+        self.contract_params = settings.mlModels.va_para
+
+        # 合约类型特定价值范围
+        self.value_ranges = {
+            'CS': (-0.03, 0.08),  # 股票价值范围（年化）
+            'ETF': (-0.02, 0.06),  # ETF价值范围
+            'INDX': (-0.025, 0.07),  # 指数价值范围
+            'Future': (-0.04, 0.10),  # 期货价值范围
+            'Option': (-0.05, 0.15)  # 期权价值范围
+        }
+
+        self.model = None
+        self.shap_explainer = None
+        self.is_trained = False
+        self.contract_type = None
+        self.value_features = None
+
+    def train(self, X, y, contract_type):
+        """
+        训练价值分析模型
+
+        参数:
+        X: 特征矩阵
+        y: 目标变量（未来20日超额收益）
+        contract_type: 合约类型
+        cv_folds: 交叉验证折数
+
+        返回:
+        模型性能指标
+        """
+        # 2. 记录合约类型和特征
+        self.contract_type = contract_type
+        self.value_features = X.columns.tolist()
+
+        # 3. 时间序列交叉验证
+        tscv = TimeSeriesSplit(n_splits=settings.mlModels.cv_fold)
+        cv_results = {
+            'train_mae': [],
+            'test_mae': [],
+            'train_r2': [],
+            'test_r2': []
+        }
+
+        # 4. 交叉验证训练
+        print('开始训练模型')
+        for train_idx, test_idx in tqdm(tscv.split(X)):
+            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+
+            # 训练模型
+            model = xgb.XGBRegressor(**self.contract_params)
+            model.fit(X_train, y_train)
+
+            # 评估
+            y_train_pred = model.predict(X_train)
+            y_test_pred = model.predict(X_test)
+
+            cv_results['train_mae'].append(mean_absolute_error(y_train, y_train_pred))
+            cv_results['test_mae'].append(mean_absolute_error(y_test, y_test_pred))
+            cv_results['train_r2'].append(r2_score(y_train, y_train_pred))
+            cv_results['test_r2'].append(r2_score(y_test, y_test_pred))
+
+        # 5. 使用全部数据重新训练
+        self.model = xgb.XGBRegressor(**self.contract_params)
+        self.model.fit(X, y)
+
+        # 6. 创建SHAP解释器
+        self.shap_explainer = shap.TreeExplainer(self.model, feature_names=X.columns)
+
+        # 7. 记录模型状态
+        self.is_trained = True
+
+        # 8. 保存模型性能
+        performance = {
+            'train_mae': np.mean(cv_results['train_mae']),
+            'test_mae': np.mean(cv_results['test_mae']),
+            'train_r2': np.mean(cv_results['train_r2']),
+            'test_r2': np.mean(cv_results['test_r2']),
+            'sample_size': len(X),
+            'contract_type': contract_type
+        }
+
+        return performance
+
+    def predict_excess_return(self, features: pd.Series) -> float:
+        """预测未来20日超额收益"""
+        if not self.is_trained:
+            raise ValueError("模型尚未训练，请先调用train方法")
+        pred_data = features[self.value_features].values.reshape(1, -1)
+        return self.model.predict(pred_data)[0]
+
+    def predict_value_score(self, features: pd.Series) -> float:
+        """预测投资价值评分（0-100分）"""
+        predicted_excess_returns = self.predict_excess_return(features)
+        min_value, max_value = self.value_ranges[self.contract_type]
+
+        # 映射到0-100分，使用Sigmoid或Sigmoid-like函数进行平滑，避免简单的线性截断
+        # 简单线性映射（保持原样，但进行了截断）
+        score = 100 * (predicted_excess_returns - min_value) / (max_value - min_value)
+        return max(0, min(100, score))
+
+    def get_value_rationale(self, features: pd.Series) -> List[Dict[str, Union[str, float]]]:
+        """生成价值评分的理由说明（基于SHAP值）"""
+        if not self.is_trained:
+            raise ValueError("模型尚未训练")
+        if self.shap_explainer is None:
+            return []
+
+        # 1. 计算SHAP值
+        pred_data = features[self.value_features].values.reshape(1, -1)
+        # 注意：TreeExplainer.shap_values() 的输出是一个数组或列表
+        shap_values = self.shap_explainer.shap_values(pred_data)
+
+        if isinstance(shap_values, list):
+            # For multi-output models, though usually just one for regression
+            shap_values = shap_values[0]
+
+            # 2. 生成解释
+        contributions: List[Dict[str, Union[str, float]]] = []
+        for i, feature in enumerate(self.value_features):
+            shap_value = shap_values[0][i] if shap_values.ndim == 2 else shap_values[i]
+
+            # 仅关注对预测有显著影响的特征
+            if abs(shap_value) < 0.005:
+                continue
+
+            explanation = self._get_feature_explanation(feature, shap_value, features)
+
+            contributions.append({
+                'feature': feature,
+                'shap_value': float(shap_value),
+                'explanation': explanation
+            })
+
+        # 3. 按绝对SHAP值排序，返回最重要的5条理由
+        contributions.sort(key=lambda x: abs(x['shap_value']), reverse=True)
+        return contributions[:5]
+
+    def _get_feature_explanation(self, feature: str, shap_value: float, features: pd.Series) -> str:
+        """
+        生成更专业、更可解释的特征贡献说明
+        """
+        is_positive = shap_value > 0
+        direction = "正向" if is_positive else "负向"
+
+        # 提取值
+        value = features.get(feature, np.nan)
+        if pd.isna(value):
+            return f"特征 {feature} 数据缺失，对价值产生了 {direction} 影响。"
+
+        # --- 通用特征解释 ---
+        if feature == 'ma_20d':
+            diff_percent = value * 100
+            return f"价格相对20日均线乖离度（{diff_percent:.2f}%）影响：乖离度{'高于' if diff_percent > 0 else '低于'}零值，模型视为{direction}信号。"
+
+        elif feature == 'vol_ratio_20_60':
+            vol_ratio = value
+            analysis = ""
+            if vol_ratio > 1.1:
+                analysis = "短期波动率显著高于长期，预示市场进入高波动或趋势可能反转。"
+            elif vol_ratio < 0.9:
+                analysis = "短期波动率低于长期，显示市场情绪趋于稳定。"
+            else:
+                analysis = "波动率结构平稳。"
+            return f"波动率斜率 ({vol_ratio:.2f}) 分析：{analysis}，模型视为{direction}信号。"
+
+        elif feature == 'sharpe_20d':
+            return f"历史20日夏普比率 ({value:.3f})：体现近期风险调整收益水平，对价值有{direction}影响。"
+
+        elif feature == 'var_95':
+            return f"60日历史VaR(95%) ({value * 100:.2f}%)：体现尾部风险水平，风险越低对价值越有{direction}影响。"
+
+        # --- 合约类型特定解释 ---
+        elif self.contract_type == 'CS' and feature == 'turnover_ratio':
+            ratio_percent = value * 100
+            sentiment = "强势资金流入" if value > 1.5 else ("温和活跃" if value > 1.0 else "交投清淡")
+            return f"换手率与均值比 ({ratio_percent:.0f}%)：市场活跃度高，模型捕捉到{sentiment}带来的{direction}影响。"
+
+        elif self.contract_type == 'Future' and feature == 'settlement':
+            return f"当前结算价 ({value:.2f}) 对价值预测有{direction}影响。"
+
+        elif self.contract_type == 'Option' and feature == 'implied_vol':
+            iv_percent = value * 100
+            sentiment = "溢价" if iv_percent > 30 else "低估"
+            return f"隐含波动率 ({iv_percent:.1f}%)：IV水平相对{'较高' if is_positive else '较低'}，市场情绪偏{sentiment}，模型视为{direction}信号。"
+
+        # 默认通用解释
+        return f"{feature} (当前值: {value:.3f}) 对投资价值有 {direction} 影响。"
+
+    def _analyze_risk_features(self, features: pd.Series) -> Dict[str, Union[str, float]]:
+        """
+        基于关键风险特征，给出定性风险评估
+        """
+        risk_level = "中"
+        vol_20d = features.get('vol_20d', np.nan)
+        var_95 = features.get('var_95', np.nan)
+        cvar_95 = features.get('cvar_95', np.nan)
+
+        # 1. 波动率评估
+        if not pd.isna(vol_20d):
+            if vol_20d > 0.4:
+                risk_level = "高"
+            elif vol_20d < 0.15:
+                if risk_level != "高":  # 不覆盖高风险
+                    risk_level = "低"
+
+        # 2. 尾部风险评估 (CVaR的绝对值越大，尾部风险越高)
+        if not pd.isna(cvar_95) and cvar_95 < -0.05:
+            risk_level = "高"  # 历史最大损失风险大，直接定为高风险
+
+        return {
+            "level": risk_level,
+            "volatility": vol_20d,
+            "var_95": var_95,
+            "cvar_95": cvar_95
+        }
+
+    def generate_investment_report(self, features: pd.Series) -> str:
+        """
+        生成包含价值、风险和收益预测的综合投资分析报告 (Markdown 格式)
+        """
+        # 1. 核心预测
+        value_score = self.predict_value_score(features)
+        predicted_returns = self.predict_excess_return(features)
+
+        # 2. 风险分析
+        risk_data = self._analyze_risk_features(features)
+
+        # 3. 价值理由
+        rationale = self.get_value_rationale(features)
+
+        # 4. 报告生成
+        report_markdown = []
+        report_markdown.append(f"# 合约价值分析报告 - {self.contract_type}")
+        report_markdown.append(f"## 🚀 投资价值评分：{value_score:.1f}/100")
+
+        # 价值等级判断
+        if value_score >= 80:
+            value_grade = "极具吸引力 (Strong Buy)"
+        elif value_score >= 60:
+            value_grade = "中高价值 (Buy)"
+        elif value_score >= 40:
+            value_grade = "中性偏多 (Hold)"
+        else:
+            value_grade = "低价值/高估 (Sell)"
+
+        report_markdown.append(f"**评估结论:** **{value_grade}**")
+        report_markdown.append("\n---")
+
+        report_markdown.append("## 📊 投资收益预测")
+        report_markdown.append(f"基于模型预测，未来20日超额收益率（年化）预期为: **{predicted_returns * 100:.2f}%**")
+        report_markdown.append("\n---")
+
+        report_markdown.append("## 🛡️ 风险分析 (Investment Risk)")
+        report_markdown.append(f"**当前风险水平：** **{risk_data['level']}**")
+
+        report_markdown.append("### 风险指标快照：")
+        report_markdown.append(f"- **20日波动率 (Volatility):** {risk_data['volatility']:.3f} (反映短期价格震荡程度)")
+        report_markdown.append(f"- **VaR 95% (最大亏损):** {risk_data['var_95'] * 100:.2f}% (60日历史数据，95%置信度下的最大亏损)")
+        report_markdown.append(
+            f"- **CVaR 95% (平均尾部亏损):** {risk_data['cvar_95'] * 100:.2f}% (95%置信度下平均最差损失，**尾部风险关键指标**)")
+        report_markdown.append("\n---")
+
+        report_markdown.append("## 💡 价值驱动因素 (SHAP 解释)")
+        report_markdown.append("以下是模型预测该价值评分的**主要原因**（按影响力排序）：")
+
+        for item in rationale:
+            impact = "（积极贡献）" if item['shap_value'] > 0 else "（消极贡献）"
+            report_markdown.append(f"- **{item['feature']}** {impact}: {item['explanation']}")
+
+        report_markdown.append("\n---")
+        report_markdown.append("模型由 XGBoost 训练，目标变量为未来20日超额收益。")
+
+        return "\n".join(report_markdown)
+
+if __name__ == '__main__':
+    # 1. 初始化模型
+    value_model = ContractValueAnalysisModel()
+    features_data = pd.read_csv(r"/root/nas-private/bigdata_final_project/data/processed/20240401_20251128_3d96b3a4bf_CS_features_data.csv")
+    features_data = features_data.loc[:, ~(features_data == 0).all(axis=0)]
+
+    # 2. 准备训练数据（选择价值分析所需特征）
+    all_features = settings.financial_data.features
+    selected_features = all_features['Common_Features']+all_features['Specific_Features']['CS']
+    value_features = list(set(features_data.columns)&set(selected_features))
+
+    # 3. 定义目标变量 y (未来20日超额收益)
+    future_returns = features_data['close'].shift(-20) / features_data['close'] - 1
+
+    # 合并特征和目标变量
+    data = features_data[value_features].copy()
+    data['future_returns'] = future_returns
+
+    # 删除任何包含NaN的行
+    data = data.dropna()
+
+    # 分离X和y
+    X_train = data[value_features]
+    y_train = data['future_returns']
+
+    # 4. 训练模型
+    performance = value_model.train(X_train, y_train, contract_type="CS")  # 将"CS"替换为您的合约类型
+    print("\n--- 模型训练性能 (5折CV平均) ---")
+    print(performance)
+    print("---------------------------------")
+
+    # 4. 预测并生成报告
+    latest_features = X_train.iloc[-1].copy()  # 获取最新一行数据 (Series)
+
+    # 模拟一些极端值以测试解释逻辑
+    latest_features['ma_20d'] = 0.05  # 价格远高于均线
+    latest_features['vol_ratio_20_60'] = 1.3  # 短期波动率极高
+    latest_features['cvar_95'] = -0.06  # 尾部风险高
+    latest_features['turnover_ratio'] = 2.0  # 换手率翻倍
+
+    report = value_model.generate_investment_report(latest_features)
+
+    print("\n--- 📝 最新投资分析报告 ---")
+    print(report)
+    print("-----------------------------")

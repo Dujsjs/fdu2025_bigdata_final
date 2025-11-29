@@ -280,7 +280,9 @@ class RiceQuantService:
         shared_FIELDS_LIST = [
             'close', 'high', 'low', 'total_turnover', 'volume', 'prev_close'
         ]
-        optional_FIELDS_LIST = {'CS':['num_trades'], 'ETF':['num_trades'], 'INDX':[],
+        optional_FIELDS_LIST = {'CS':['num_trades'],
+                                'ETF':['num_trades'],
+                                'INDX':[],
                                 'Future':['open_interest', 'settlement'],
                                 'Option':['strike_price', 'contract_multiplier']}
         try:
