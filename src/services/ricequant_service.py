@@ -294,6 +294,79 @@ class RiceQuantService:
         data_addr = self._update_price_data(instru_type=type, start_date=start_date, end_date=end_date, fields=fields_list)
         return data_addr, fields_list
 
+    def _update_shibor_data(self, start_date, end_date, shibor_range=['ON', '1W', '2W']):
+        # 处理日期参数
+        if start_date is None:
+            start_date_str = datetime.now().strftime("%Y%m%d")
+        else:
+            if isinstance(start_date, datetime):
+                start_date_str = start_date.strftime("%Y%m%d")
+            else:
+                start_date_str = ''.join(filter(str.isdigit, str(start_date)))[:8]
+
+        if end_date is None:
+            end_date_str = datetime.now().strftime("%Y%m%d")
+        else:
+            if isinstance(end_date, datetime):
+                end_date_str = end_date.strftime("%Y%m%d")
+            else:
+                end_date_str = ''.join(filter(str.isdigit, str(end_date)))[:8]
+
+        shibor_range_str = ','.join(shibor_range)
+        shibor_range_hash = hashlib.md5(shibor_range_str.encode('utf-8')).hexdigest()[:10]
+        file_name = f'{start_date_str}_{end_date_str}_{shibor_range_hash}_shibor_data.csv'
+        output_file_path = os.path.join(settings.project.project_dir, settings.paths.financial_data, file_name)
+        if os.path.exists(output_file_path):
+            print("shibor数据已经存在，无需重复下载！")
+            return output_file_path
+        print("正在下载shibor数据...")
+        shibor_data = rqdatac.get_interbank_offered_rate(start_date=int(start_date_str), end_date=int(end_date_str), fields=shibor_range, source='Shibor')
+        shibor_data.reset_index(drop=False, inplace=True)
+        shibor_data.to_csv(output_file_path, index=False)
+        print("shibor数据下载完成！")
+        return output_file_path
+
+    def merge_shibor_data(self, data_to_merge: pd.DataFrame, start_date, end_date, shibor_range=['ON', '1W', '2W'], transfer_days: int=1):
+        """
+        将shibor数据加入到数据框中
+        :param data_to_merge:
+        :param start_date:
+        :param end_date:
+        :param shibor_range:
+        :param transfer_days: shibor利率默认是年化利率，需要将其转化为对应时间粒度的数据
+        :return:
+        """
+        # 处理日期参数
+        if start_date is None:
+            start_date_str = datetime.now().strftime("%Y%m%d")
+        else:
+            if isinstance(start_date, datetime):
+                start_date_str = start_date.strftime("%Y%m%d")
+            else:
+                start_date_str = ''.join(filter(str.isdigit, str(start_date)))[:8]
+
+        if end_date is None:
+            end_date_str = datetime.now().strftime("%Y%m%d")
+        else:
+            if isinstance(end_date, datetime):
+                end_date_str = end_date.strftime("%Y%m%d")
+            else:
+                end_date_str = ''.join(filter(str.isdigit, str(end_date)))[:8]
+
+        shibor_data_addr = self._update_shibor_data(start_date=int(start_date_str), end_date=int(end_date_str), shibor_range=shibor_range)
+        shibor_data = pd.read_csv(shibor_data_addr)
+        data_to_merge['date'] = pd.to_datetime(data_to_merge['date']).dt.strftime('%Y-%m-%d')
+        shibor_data['date'] = pd.to_datetime(shibor_data['date']).dt.strftime('%Y-%m-%d')
+
+        if 'date' in data_to_merge.columns:
+            # 如果有date列，则按date列进行左外连接合并
+            merged_data = pd.merge(data_to_merge, shibor_data, on='date', how='left')
+            merged_data[shibor_range] = merged_data[shibor_range].apply(lambda x: (1 + x/100) ** (transfer_days/360) - 1)
+            return merged_data
+        else:
+            print("输入数据中缺少date列，无法合并Shibor数据")
+            return data_to_merge
+
 if __name__ == '__main__':
     tmp = RiceQuantService()
     # print(tmp.query_stock_info('INDX', query_by_code='000001'))
@@ -304,3 +377,4 @@ if __name__ == '__main__':
         'close', 'high', 'low', 'total_turnover', 'volume', 'prev_close'
     ]
     print(tmp._update_price_data(instru_type='CS', start_date=20251124, end_date=20251128, fields=FIELDS_LIST))
+    print(tmp._update_shibor_data(start_date=20251124, end_date=20251128, shibor_range=['1W']))

@@ -32,94 +32,97 @@ rag:
 financial_data:
   update_frequency: 7
   rice_quant_uri: "tcp://license:BMyPixcVQXxsui5fCmvH9BOD5n_k9npLQLbHruaWk_4ov3ge25hLxtOQILddXB00y1UPnGXWXUga2a66ScdKwiGsO4a_CXga2ItID0nVzPOSSF5YVh2CgHbUVq2tlyfezRDSyFSLu0clL9IYVmL8__t7tsB9P-L6w7JLGPEh8Ps=NWFZwzx0mh2GCDPPsU9FdAGWH4plnfS-a6f-9cI9t-AqVo9qajWy-pnNwHTfsdMBtIedP21AU1i8f1Is86lsl_MAyjkoPEIZaL1ZPLzBofhmJB9IetIoENUc0Kw91mVgTTFtAf9MeML05qLgBxplRZkLyEVPl-hA4vW5PTlpXtg=@rqdatad-pro.ricequant.com:16011"
-  features: {
-    "Common_Features": [
-      "close",
-      "returns",
-      "log_returns",
-      "vol_10d",
-      "vol_20d",
-      "vol_60d",
-      "vol_ratio_20_60",
-      "ma_5d",
-      "ma_20d",
-      "ma_60d",
-      "ma_momentum",
-      "true_range",
-      "atr_14d",
-      "sharpe_20d",
-      "vol_regime",
-      "trend_strength",
-      "var_95",
-      "cvar_95",
-      "market_regime"
-    ],
-    "Specific_Features": {
-      "CS": [
-        "volume_10d_ma",
-        "volume_ratio",
-        "volume_momentum",
-        "turnover_ratio",
-        "trade_frequency",
-        "trade_frequency_20d_ma",
-        "trade_frequency_ratio",
-        "is_limit_up",
-        "is_limit_down",
-        "limit_up_count_20d",
-        "limit_down_count_20d",
-        "turnover_rate_approx"
-      ],
-      "ETF": [
-        "volume_10d_ma",
-        "volume_ratio",
-        "volume_momentum",
-        "turnover_ratio",
-        "trade_frequency",
-        "trade_frequency_20d_ma",
-        "trade_frequency_ratio",
-        "is_limit_up",
-        "is_limit_down",
-        "limit_up_count_20d",
-        "limit_down_count_20d"
-      ],
-      "INDX": [
-        "index_range",
-        "index_range_20d_ma",
-        "index_momentum_strength"
-      ],
-      "Future": [
-        "oi_1d_change",
-        "oi_5d_change",
-        "oi_momentum",
-        "settlement"
-      ],
-      "Option": [
-        "oi_1d_change",
-        "oi_5d_change",
-        "oi_momentum",
-        "settlement",
-        "moneyness",
-        "moneyness_20d_ma",
-        "moneyness_deviation",
-        "contract_value",
-        "implied_vol"
-      ]
-    }
-  }
+#  features: {
+#    "Common_Features": [
+#      "close",
+#      "returns",
+#      "log_returns",
+#      "vol_10d",
+#      "vol_20d",
+#      "vol_60d",
+#      "vol_ratio_20_60",
+#      "ma_5d",
+#      "ma_20d",
+#      "ma_60d",
+#      "ma_momentum",
+#      "true_range",
+#      "atr_14d",
+#      "sharpe_20d",
+#      "vol_regime",
+#      "trend_strength",
+#      "var_95",
+#      "cvar_95",
+#      "market_regime"
+#    ],
+#    "Specific_Features": {
+#      "CS": [
+#        "volume_10d_ma",
+#        "volume_ratio",
+#        "volume_momentum",
+#        "turnover_ratio",
+#        "trade_frequency",
+#        "trade_frequency_20d_ma",
+#        "trade_frequency_ratio",
+#        "is_limit_up",
+#        "is_limit_down",
+#        "limit_up_count_20d",
+#        "limit_down_count_20d",
+#        "turnover_rate_approx"
+#      ],
+#      "ETF": [
+#        "volume_10d_ma",
+#        "volume_ratio",
+#        "volume_momentum",
+#        "turnover_ratio",
+#        "trade_frequency",
+#        "trade_frequency_20d_ma",
+#        "trade_frequency_ratio",
+#        "is_limit_up",
+#        "is_limit_down",
+#        "limit_up_count_20d",
+#        "limit_down_count_20d"
+#      ],
+#      "INDX": [
+#        "index_range",
+#        "index_range_20d_ma",
+#        "index_momentum_strength"
+#      ],
+#      "Future": [
+#        "oi_1d_change",
+#        "oi_5d_change",
+#        "oi_momentum",
+#        "settlement"
+#      ],
+#      "Option": [
+#        "oi_1d_change",
+#        "oi_5d_change",
+#        "oi_momentum",
+#        "settlement",
+#        "moneyness",
+#        "moneyness_20d_ma",
+#        "moneyness_deviation",
+#        "contract_value",
+#        "implied_vol"
+#      ]
+#    }
+#  }
+  features_max_rolling_window: 60
 
 # 模型配置
 mlModels:
-  cv_fold: 5
-  va_para: {
+  cv_fold: 10
+  early_stopping_rounds: 50   # 设定早停轮数
+  num_boost_rounds: 3000
+  parameters: {
     'objective': 'reg:squarederror',
-    'learning_rate': 0.01,
+    'eval_metric': 'mae',
+    'learning_rate': 0.005,
     'max_depth': 6,
     'subsample': 0.8,
     'colsample_bytree': 0.8,
-    'gamma': 0.2,
-    'min_child_weight': 3,
-    'n_estimators': 1000,
+    'min_child_weight': 6,
     'lambda': 2.0,   # L2正则化
+    'gamma': 0.1,
     'alpha': 0.6   # L1正则化
   }
 

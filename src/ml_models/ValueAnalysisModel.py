@@ -7,6 +7,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_error, r2_score
 from typing import Dict, List, Union
 from src.core.load_config import settings
+from src.services.ricequant_service import RiceQuantService
 
 class ContractValueAnalysisModel:
     """
@@ -20,7 +21,7 @@ class ContractValueAnalysisModel:
 
     def __init__(self):
         # 合约类型特定参数
-        self.contract_params = settings.mlModels.va_para
+        self.contract_params = settings.mlModels.parameters
 
         # 合约类型特定价值范围
         self.value_ranges = {
@@ -36,6 +37,7 @@ class ContractValueAnalysisModel:
         self.is_trained = False
         self.contract_type = None
         self.value_features = None
+        self.EARLY_STOPPING_ROUND = settings.mlModels.early_stopping_rounds
 
     def train(self, X, y, contract_type):
         """
@@ -60,44 +62,89 @@ class ContractValueAnalysisModel:
             'train_mae': [],
             'test_mae': [],
             'train_r2': [],
-            'test_r2': []
+            'test_r2': [],
+            'best_n_estimators': []
         }
 
         # 4. 交叉验证训练
         print('开始训练模型')
-        for train_idx, test_idx in tqdm(tscv.split(X)):
-            X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-            y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        for fold, (historical_idx, test_idx) in enumerate(tqdm(tscv.split(X))):
+            X_historical, y_historical = X.iloc[historical_idx], y.iloc[historical_idx]
 
-            # 训练模型
-            model = xgb.XGBRegressor(**self.contract_params)
-            model.fit(X_train, y_train)
+            N_historical = len(X_historical)
+            VALID_RATIO = 0.2
+            valid_size = int(N_historical * VALID_RATIO)
 
-            # 评估
-            y_train_pred = model.predict(X_train)
-            y_test_pred = model.predict(X_test)
+            # 使用定义的常量 EARLY_STOPPING_ROUNDS
+            if valid_size < self.EARLY_STOPPING_ROUND:
+                print(f"Warning: Fold {fold + 1}: Validation set size ({valid_size}) is too small. Skipping fold.")
+                continue
+
+            train_subset_idx = N_historical - valid_size
+            X_train = X_historical.iloc[:train_subset_idx]
+            y_train = y_historical.iloc[:train_subset_idx]
+            X_valid = X_historical.iloc[train_subset_idx:]
+            y_valid = y_historical.iloc[train_subset_idx:]
+
+            X_test = X.iloc[test_idx]
+            y_test = y.iloc[test_idx]
+
+            # 转换为 DMatrix 格式
+            dtrain = xgb.DMatrix(X_train, label=y_train)
+            dvalid = xgb.DMatrix(X_valid, label=y_valid)
+            dtest = xgb.DMatrix(X_test)
+
+            eval_list = [(dtrain, 'train'), (dvalid, 'validation')]
+
+            # 使用 xgb.train 进行训练，参数兼容性最高
+            bst = xgb.train(
+                params=self.contract_params,  # 包含 objective, learning_rate, eval_metric 等
+                dtrain=dtrain,
+                num_boost_round=settings.mlModels.num_boost_rounds,
+                evals=eval_list,
+                early_stopping_rounds=self.EARLY_STOPPING_ROUND,
+                verbose_eval=False
+            )
+
+            # 记录最佳迭代次数
+            best_n_estimators = bst.best_iteration
+            cv_results['best_n_estimators'].append(best_n_estimators)
+
+            # 使用最佳迭代次数对训练集和测试集进行评估
+            y_train_pred = bst.predict(dtrain, iteration_range=(0, best_n_estimators))
+            y_test_pred = bst.predict(dtest, iteration_range=(0, best_n_estimators))
 
             cv_results['train_mae'].append(mean_absolute_error(y_train, y_train_pred))
             cv_results['test_mae'].append(mean_absolute_error(y_test, y_test_pred))
             cv_results['train_r2'].append(r2_score(y_train, y_train_pred))
             cv_results['test_r2'].append(r2_score(y_test, y_test_pred))
 
-        # 5. 使用全部数据重新训练
-        self.model = xgb.XGBRegressor(**self.contract_params)
+        # 计算最佳轮数的平均值
+        avg_best_n_estimators = int(np.mean(cv_results['best_n_estimators']))
+        print(f"交叉验证平均最佳迭代次数: {avg_best_n_estimators}")
+
+        # 4. 使用全部数据重新训练最终模型（使用平均最佳轮数）
+        # 最终模型使用 XGBRegressor 封装器，便于后续集成（例如 SHAP）
+        print(f'使用全部数据和平均最佳迭代次数 {avg_best_n_estimators} 重新训练最终模型...')
+        final_params = self.contract_params.copy()
+        final_params['n_estimators'] = avg_best_n_estimators
+        final_params.pop('eval_metric', None)  # 最终训练无需监控指标
+        self.model = xgb.XGBRegressor(**final_params)
         self.model.fit(X, y)
 
-        # 6. 创建SHAP解释器
-        self.shap_explainer = shap.TreeExplainer(self.model, feature_names=X.columns)
+        # 5. 创建SHAP解释器
+        self.shap_explainer = shap.TreeExplainer(self.model)
 
-        # 7. 记录模型状态
+        # 6. 记录模型状态
         self.is_trained = True
 
-        # 8. 保存模型性能
+        # 7. 保存模型性能
         performance = {
             'train_mae': np.mean(cv_results['train_mae']),
             'test_mae': np.mean(cv_results['test_mae']),
             'train_r2': np.mean(cv_results['train_r2']),
             'test_r2': np.mean(cv_results['test_r2']),
+            'avg_n_estimators': avg_best_n_estimators,  # 增加平均最佳轮数
             'sample_size': len(X),
             'contract_type': contract_type
         }
@@ -114,6 +161,7 @@ class ContractValueAnalysisModel:
     def predict_value_score(self, features: pd.Series) -> float:
         """预测投资价值评分（0-100分）"""
         predicted_excess_returns = self.predict_excess_return(features)
+        print(predicted_excess_returns)
         min_value, max_value = self.value_ranges[self.contract_type]
 
         # 映射到0-100分，使用Sigmoid或Sigmoid-like函数进行平滑，避免简单的线性截断
@@ -154,9 +202,9 @@ class ContractValueAnalysisModel:
                 'explanation': explanation
             })
 
-        # 3. 按绝对SHAP值排序，返回最重要的5条理由
+        # 3. 按绝对SHAP值排序
         contributions.sort(key=lambda x: abs(x['shap_value']), reverse=True)
-        return contributions[:5]
+        return contributions
 
     def _get_feature_explanation(self, feature: str, shap_value: float, features: pd.Series) -> str:
         """
@@ -296,47 +344,63 @@ class ContractValueAnalysisModel:
         return "\n".join(report_markdown)
 
 if __name__ == '__main__':
+    rice_quant_service = RiceQuantService()
+
     # 1. 初始化模型
     value_model = ContractValueAnalysisModel()
     features_data = pd.read_csv(r"/root/nas-private/bigdata_final_project/data/processed/20240401_20251128_3d96b3a4bf_CS_features_data.csv")
-    features_data = features_data.loc[:, ~(features_data == 0).all(axis=0)]
+    features_data = features_data.loc[:, ~(features_data == 0).all(axis=0)]   # 删除所有全零列
 
-    # 2. 准备训练数据（选择价值分析所需特征）
-    all_features = settings.financial_data.features
-    selected_features = all_features['Common_Features']+all_features['Specific_Features']['CS']
-    value_features = list(set(features_data.columns)&set(selected_features))
+    # # 2. 准备训练数据（选择价值分析所需特征）
+    # all_features = settings.financial_data.features
+    # selected_features = all_features['Common_Features'] + all_features['Specific_Features']['CS']
+    # value_features = list(set(features_data.columns) & set(selected_features))
 
     # 3. 定义目标变量 y (未来20日超额收益)
-    future_returns = features_data['close'].shift(-20) / features_data['close'] - 1
+    # 直接在原始数据上操作，保持顺序不变
+    data = features_data.copy()
+    x_col = data.columns.to_list()
+    features_data_sorted = features_data.sort_values(['order_book_id', 'date'])  # 确保按股票和日期排序
+    data['future_returns'] = features_data_sorted.groupby('order_book_id')['close'].transform(lambda x: x.shift(-5) / x - 1)
+
+    # 分组缩尾操作（Winsorization）
+    def winsorize_series(series, lower_percentile=0.05, upper_percentile=0.95):
+        lower_bound = series.quantile(lower_percentile)
+        upper_bound = series.quantile(upper_percentile)
+        return series.clip(lower=lower_bound, upper=upper_bound)
+    data['future_returns'] = data.groupby('order_book_id')['future_returns'].transform(winsorize_series)
 
     # 合并特征和目标变量
-    data = features_data[value_features].copy()
-    data['future_returns'] = future_returns
+    data = rice_quant_service.merge_shibor_data(data, '20240401', '20251128', ['1W'], 3)
+    data['excess_returns'] = data['future_returns'] - data['1W']
+    # data['log_excess_returns'] = np.log(data['future_returns'] + 1) - np.log(data['1W'])
 
     # 删除任何包含NaN的行
     data = data.dropna()
 
     # 分离X和y
-    X_train = data[value_features]
-    y_train = data['future_returns']
+    X_train = data[x_col].drop(columns=['close', 'returns', 'log_returns'])
+    X_train = X_train.set_index(['date', 'order_book_id'])
+    y_train = data[['date', 'order_book_id', 'excess_returns']]
+    y_train = y_train.set_index(['date', 'order_book_id'])
 
     # 4. 训练模型
     performance = value_model.train(X_train, y_train, contract_type="CS")  # 将"CS"替换为您的合约类型
-    print("\n--- 模型训练性能 (5折CV平均) ---")
+    print("\n--- 模型训练性能 ---")
     print(performance)
     print("---------------------------------")
 
-    # 4. 预测并生成报告
-    latest_features = X_train.iloc[-1].copy()  # 获取最新一行数据 (Series)
-
-    # 模拟一些极端值以测试解释逻辑
-    latest_features['ma_20d'] = 0.05  # 价格远高于均线
-    latest_features['vol_ratio_20_60'] = 1.3  # 短期波动率极高
-    latest_features['cvar_95'] = -0.06  # 尾部风险高
-    latest_features['turnover_ratio'] = 2.0  # 换手率翻倍
-
-    report = value_model.generate_investment_report(latest_features)
-
-    print("\n--- 📝 最新投资分析报告 ---")
-    print(report)
-    print("-----------------------------")
+    # # 4. 预测并生成报告
+    # latest_features = X_train.iloc[-1].copy()  # 获取最新一行数据 (Series)
+    #
+    # # 模拟一些极端值以测试解释逻辑
+    # latest_features['ma_20d'] = 0.05  # 价格远高于均线
+    # latest_features['vol_ratio_20_60'] = 1.3  # 短期波动率极高
+    # latest_features['cvar_95'] = -0.06  # 尾部风险高
+    # latest_features['turnover_ratio'] = 2.0  # 换手率翻倍
+    #
+    # report = value_model.generate_investment_report(latest_features)
+    #
+    # print("\n--- 📝 最新投资分析报告 ---")
+    # print(report)
+    # print("-----------------------------")

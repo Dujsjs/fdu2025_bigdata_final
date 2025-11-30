@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from src.services.ricequant_service import RiceQuantService
 from src.core.load_config import settings
 import hashlib
@@ -156,13 +156,13 @@ class MLService:
             order_book_id: [str],
             start_date: str,
             end_date: str,
-            prev_contract_data: Optional[pd.DataFrame] = None
     ) -> str:
         """
-        构建适用于多种合约类型的全面特征集
+        构建适用于多种合约类型的全面特征集，不涉及聚合操作
         :param order_book_id: 用户指定的合约代码列表，仅对此部分样本开展特征工程
         :param contract_type: 合约类型 ('CS', 'ETF', 'INDX', 'Future', 'Option')
-        :param prev_contract_data: 用于期货展期等场景的前序合约数据（可选）
+        :param start_date: 数据的起始日期
+        :param end_date: 数据的终止日期
         :return: 包含所有特征的DataFrame的存储地址
         """
         df_addr, df_fields = self.ricequant_service.instruments_features_fetching(contract_type, int(start_date), int(end_date))
@@ -196,78 +196,106 @@ class MLService:
 
         # 4. 初始化特征DataFrame
         features = pd.DataFrame(index=df.index)
+        features['date'] = df['date']
+        features['order_book_id'] = df['order_book_id']
+        features['close'] = df['close']
+
+        # 关键步骤：创建分组对象
+        grouped = df.groupby('order_book_id')
 
         """ ===== 共享基础特征 (所有合约类型) ===== """
         # 价格特征
-        features['close'] = df['close']
-        features['returns'] = df['close'].pct_change()
-        features['log_returns'] = np.log(df['close'] / df['close'].shift(1))
+        features['returns'] = grouped['close'].transform(lambda x: x.pct_change())
+        features['log_returns'] = grouped['close'].transform(lambda x: np.log(x / x.shift(1)))
+
+        df['returns'] = features['returns']     # 无需重新创建 grouped，因为 df 已经更新，grouped 会在访问时使用 df 的最新列
+        df['log_returns'] = features['log_returns']
 
         # 波动率特征
-        features['vol_10d'] = features['returns'].rolling(10).std() * np.sqrt(252)
-        features['vol_20d'] = features['returns'].rolling(20).std() * np.sqrt(252)
-        features['vol_60d'] = features['returns'].rolling(60).std() * np.sqrt(252)
+        features['vol_10d'] = grouped['returns'].transform(lambda x: x.rolling(10).std()) * np.sqrt(252)
+        features['vol_20d'] = grouped['returns'].transform(lambda x: x.rolling(20).std()) * np.sqrt(252)
+        features['vol_60d'] = grouped['returns'].transform(lambda x: x.rolling(60).std()) * np.sqrt(252)
         features['vol_ratio_20_60'] = features['vol_20d'] / features['vol_60d']  # 波动率斜率
 
         # 趋势特征
-        features['ma_5d'] = df['close'] / df['close'].rolling(5).mean() - 1
-        features['ma_20d'] = df['close'] / df['close'].rolling(20).mean() - 1
-        features['ma_60d'] = df['close'] / df['close'].rolling(60).mean() - 1
-        features['ma_momentum'] = features['ma_20d'] - features['ma_20d'].shift(5)
+        features['ma_5d'] = grouped['close'].transform(lambda x: x / x.rolling(5).mean() - 1)
+        features['ma_20d'] = grouped['close'].transform(lambda x: x / x.rolling(20).mean() - 1)
+        features['ma_60d'] = grouped['close'].transform(lambda x: x / x.rolling(60).mean() - 1)
+
+        # 动量特征
+        df['ma_20d'] = features['ma_20d']
+        features['ma_momentum'] = grouped['ma_20d'].transform(lambda x: x - x.shift(5))
 
         # 真实波幅特征
         if 'high' in df.columns and 'low' in df.columns and 'prev_close' in df.columns:
-            true_range = np.maximum(
-                df['high'] - df['low'],
-                np.maximum(
-                    abs(df['high'] - df['prev_close'].shift(1)),
-                    abs(df['low'] - df['prev_close'].shift(1))
+            # 真实波幅计算
+            def calculate_true_range(group):
+                prev_close_shifted = group['prev_close'].shift(1)
+                true_range_val = np.maximum(
+                    group['high'] - group['low'],
+                    np.maximum(
+                        abs(group['high'] - prev_close_shifted),
+                        abs(group['low'] - prev_close_shifted)
+                    )
                 )
-            )
-            features['true_range'] = true_range / df['prev_close'].shift(1)
-            features['atr_14d'] = features['true_range'].rolling(14).mean()
+                # 使用前一日收盘价计算百分比TR，注意分母也需要 shift(1)
+                return true_range_val / group['prev_close'].shift(1)
+
+            features['true_range'] = grouped.apply(calculate_true_range, include_groups=False).reset_index(level=0, drop=True)
+            # ATR
+            df['true_range'] = features['true_range']
+            features['atr_14d'] = grouped['true_range'].transform(lambda x: x.rolling(14).mean())
 
         """ ===== 按合约类型添加特定特征 ===== """
         if contract_type in ['CS', 'ETF']:
             """ ===== 股票/ETF 特有特征 ===== """
             # 量能特征
             if 'volume' in df.columns:
-                features['volume_10d_ma'] = df['volume'].rolling(10).mean()
+                # 滚动均值
+                features['volume_10d_ma'] = grouped['volume'].transform(lambda x: x.rolling(10).mean())
                 features['volume_ratio'] = df['volume'] / features['volume_10d_ma']
-                features['volume_momentum'] = features['volume_ratio'] - features['volume_ratio'].shift(5)
+                # 动量
+                df['volume_ratio'] = features['volume_ratio']
+                features['volume_momentum'] = grouped['volume_ratio'].transform(lambda x: x - x.shift(5))
 
             if 'total_turnover' in df.columns:
-                features['turnover_ratio'] = df['total_turnover'] / df['total_turnover'].rolling(30).mean()
+                # 换手率与均值比
+                features['turnover_ratio'] = grouped['total_turnover'].transform(lambda x: x / x.rolling(30).mean())
 
             # 交易活跃度特征
             if 'num_trades' in df.columns:
                 features['trade_frequency'] = df['num_trades'] / df['volume']
-                features['trade_frequency_20d_ma'] = features['trade_frequency'].rolling(20).mean()
+                # 20日均值
+                df['trade_frequency'] = features['trade_frequency']
+                features['trade_frequency_20d_ma'] = grouped['trade_frequency'].transform(lambda x: x.rolling(20).mean())
                 features['trade_frequency_ratio'] = features['trade_frequency'] / features['trade_frequency_20d_ma']
 
             # 市场状态特征
             if all(col in df.columns for col in ['close', 'limit_up', 'limit_down']):
                 features['is_limit_up'] = (df['close'] >= df['limit_up'] * 0.995).astype(int)
                 features['is_limit_down'] = (df['close'] <= df['limit_down'] * 1.005).astype(int)
-                features['limit_up_count_20d'] = features['is_limit_up'].rolling(20).sum()
-                features['limit_down_count_20d'] = features['is_limit_down'].rolling(20).sum()
+                # 20日计数
+                df['is_limit_up'] = features['is_limit_up']
+                df['is_limit_down'] = features['is_limit_down']
+                features['limit_up_count_20d'] = grouped['is_limit_up'].transform(lambda x: x.rolling(20).sum())
+                features['limit_down_count_20d'] = grouped['is_limit_down'].transform(lambda x: x.rolling(20).sum())
 
-            # 换手率特征（股票特有）
-            if contract_type == 'CS' and 'total_turnover' in df.columns and 'volume' in df.columns:
-                # 假设已获取流通股本（需外部数据），这里用近似方法
-                if prev_contract_data is not None and 'float_shares' in prev_contract_data.columns:
-                    float_shares = prev_contract_data['float_shares'].iloc[-1]
-                    features['turnover_rate'] = df['volume'] / float_shares
-                else:
-                    # 用成交额/价格近似换手率
-                    features['turnover_rate_approx'] = df['total_turnover'] / (df['close'] * df['volume'])
+            # 换手率特征（股票特有）：此处涉及外部数据，分组处理难度大，保持原逻辑但需注意外部数据对齐
+            features['turnover_rate_approx'] = df['total_turnover'] / (df['close'] * df['volume'])
+            df['turnover_rate_approx'] = features['turnover_rate_approx']
 
         elif contract_type == 'INDX':
             """ ===== 指数特有特征 ===== """
-            # 市场广度指标（需成分股数据，这里用近似方法）
+            # 市场广度指标
             if 'high' in df.columns and 'low' in df.columns:
-                features['index_range'] = (df['high'] - df['low']) / df['close'].shift(1)
-                features['index_range_20d_ma'] = features['index_range'].rolling(20).mean()
+                # 指数波动范围
+                features['index_range'] = grouped[['high', 'low', 'close']].apply(
+                    lambda x: (x['high'] - x['low']) / x['close'].shift(1),
+                    include_groups=False
+                ).reset_index(level=0, drop=True)
+                # 20日均值
+                df['index_range'] = features['index_range']
+                features['index_range_20d_ma'] = grouped['index_range'].transform(lambda x: x.rolling(20).mean())
 
             # 指数动量强度
             features['index_momentum_strength'] = features['returns'] / features['vol_20d']
@@ -276,87 +304,98 @@ class MLService:
             """ ===== 期货/期权特有特征 ===== """
             # 持仓量特征（期货/期权）
             if 'open_interest' in df.columns:
-                features['oi_1d_change'] = df['open_interest'].pct_change()
-                features['oi_5d_change'] = df['open_interest'].pct_change(5)
-                features['oi_momentum'] = features['oi_1d_change'] - features['oi_1d_change'].rolling(5).mean()
+                # 1日/5日变化
+                features['oi_1d_change'] = grouped['open_interest'].transform(lambda x: x.pct_change())
+                features['oi_5d_change'] = grouped['open_interest'].transform(lambda x: x.pct_change(5))
+                # 动量
+                df['oi_1d_change'] = features['oi_1d_change']
+                features['oi_momentum'] = grouped['oi_1d_change'].transform(lambda x: x - x.rolling(5).mean())
 
-            # 结算价处理（期货）
             settlement_col = 'settlement' if 'settlement' in df.columns else 'close'
             features['settlement'] = df[settlement_col]
 
-            # 期货特有特征
-            if contract_type == 'Future':
-                # 基差计算（需现货价格，这里假设prev_contract_data包含现货数据）
-                if prev_contract_data is not None and 'spot_price' in prev_contract_data.columns:
-                    features['basis'] = df[settlement_col] - prev_contract_data['spot_price']
-                    features['basis_ratio'] = features['basis'] / prev_contract_data['spot_price']
-                    features['basis_momentum'] = features['basis_ratio'] - features['basis_ratio'].shift(5)
+            # 期货特有特征：基差和期限结构涉及多个合约的数据对齐，此处保持原逻辑？？？？
 
-                # 期限结构特征（需多个到期合约数据）
-                if prev_contract_data is not None and 'next_settlement' in prev_contract_data.columns:
-                    features['curve_slope'] = (df[settlement_col] - prev_contract_data['next_settlement']) / df[
-                        settlement_col]
-
-            # 期权特有特征
-            elif contract_type == 'Option':
-                # 行权价相关特征
-                if 'strike_price' in df.columns:
-                    features['moneyness'] = df['close'] / df['strike_price']
-                    features['moneyness_20d_ma'] = features['moneyness'].rolling(20).mean()
-                    features['moneyness_deviation'] = features['moneyness'] - features['moneyness_20d_ma']
-
-                # 合约乘数相关
-                if 'contract_multiplier' in df.columns:
-                    features['contract_value'] = df['close'] * df['contract_multiplier']
-
-                # 隐含波动率估算（简化版）
-                if 'strike_price' in df.columns and 'settlement' in df.columns:
-                    time_to_expiry = 30  # 假设30天到期
-                    features['implied_vol'] = np.sqrt(2 * np.pi / time_to_expiry) * (
-                                df['settlement'] / df['strike_price'])
+        elif contract_type == 'Option':
+            # 行权价相关特征
+            if 'strike_price' in df.columns:
+                features['moneyness'] = df['close'] / df['strike_price']
+                # 20日均值
+                df['moneyness'] = features['moneyness']
+                features['moneyness_20d_ma'] = grouped['moneyness'].transform(lambda x: x.rolling(20).mean())
+                features['moneyness_deviation'] = features['moneyness'] - features['moneyness_20d_ma']
+            # 隐含波动率估算（简化版）
+            if 'strike_price' in df.columns and 'settlement' in df.columns:
+                time_to_expiry = 30
+                # 隐含波动率的计算不涉及滚动或 shift，但使用 apply 确保在组内操作
+                features['implied_vol'] = grouped[['settlement', 'strike_price']].apply(
+                    lambda x: np.sqrt(2 * np.pi / time_to_expiry) * (x['settlement'] / x['strike_price']),
+                    include_groups=False
+                ).reset_index(level=0, drop=True)
 
         """ ===== 所有合约类型通用的高级特征 ===== """
         # 风险调整收益
-        features['sharpe_20d'] = features['returns'].rolling(20).mean() / features['vol_20d'] * np.sqrt(252)
+        # 夏普比率
+        features['sharpe_20d'] = grouped['returns'].transform(lambda x: x.rolling(20).mean()) / features[
+            'vol_20d'] * np.sqrt(252)
+        df['sharpe_20d'] = features['sharpe_20d']
 
-        # 波动率状态
+        # 波动率状态 (qcut 是全局操作，无需分组计算)
         features['vol_regime'] = pd.qcut(features['vol_20d'], q=5, labels=False, duplicates='drop') / 4
+        df['vol_regime'] = features['vol_regime']
 
         # 趋势强度
         trend_window = 20
-        price_std = df['close'].rolling(trend_window).std()
-        price_mean = df['close'].rolling(trend_window).mean()
+        # 滚动标准差和均值
+        price_std = grouped['close'].transform(lambda x: x.rolling(trend_window).std())
+        price_mean = grouped['close'].transform(lambda x: x.rolling(trend_window).mean())
         features['trend_strength'] = (df['close'] - price_mean) / (price_std + 1e-10)
+        df['trend_strength'] = features['trend_strength']
 
         # 尾部风险指标
-        features['var_95'] = features['returns'].rolling(60).quantile(0.05)
-        features['cvar_95'] = features['returns'][features['returns'] <= features['var_95']].rolling(60).mean()
+        # VaR
+        features['var_95'] = grouped['returns'].transform(lambda x: x.rolling(60).quantile(0.05))
+        df['var_95'] = features['var_95']
 
-        # 市场状态综合指标
+        # CVaR(条件风险价值)
+        df['cvar_returns_filtered'] = features['returns'].where(features['returns'] <= features['var_95'])
+        features['cvar_95'] = grouped['cvar_returns_filtered'].transform(lambda x: x.rolling(60, min_periods=1).mean())   # 在每个合约分组内，对过滤后的（稀疏）收益率计算滚动平均。
+        df.drop(columns=['cvar_returns_filtered'], inplace=True)
+
+        # 市场状态综合指标 (基于已分组计算的特征，无需再分组)
         features['market_regime'] = (
-                0.4 * features['vol_regime'] +
-                0.3 * abs(features['trend_strength']) +
-                0.3 * (1 - features['sharpe_20d'].clip(lower=0, upper=1))
+            0.4 * features['vol_regime'] +
+            0.3 * abs(features['trend_strength']) +
+            0.3 * (1 - features['sharpe_20d'].clip(lower=0, upper=1))
         )
 
         """ ===== 特征工程后处理 ===== """
-        # 处理无穷大和NaN值
+        MAX_ROLLING_WINDOW = settings.financial_data.features_max_rolling_window
+        features = features.groupby('order_book_id').apply(
+            lambda x: x.iloc[MAX_ROLLING_WINDOW:, :],
+            include_groups=False
+        ).reset_index(level=0, drop=False)      # 按 order_book_id 分组，丢弃每个分组的前 MAX_ROLLING_WINDOW 行
+        features = features.reset_index(drop=True)
         features = features.replace([np.inf, -np.inf], np.nan)
-        features = features.fillna(method='ffill').fillna(method='bfill')
 
-        # 确保所有特征在合理范围内
-        for col in features.columns:
-            if features[col].dtype in [np.float64, np.float32]:
-                # 将极端值限制在5个标准差内
-                mean = features[col].mean()
-                std = features[col].std()
-                lower_bound = mean - 5 * std
-                upper_bound = mean + 5 * std
-                features[col] = features[col].clip(lower=lower_bound, upper=upper_bound)
+        # 填充必须在分组后进行，以避免使用下一只股票的数据填充前一只股票的NaN
+        features_grouped_for_fillna = features.groupby('order_book_id')
+        features = features_grouped_for_fillna.apply(
+            lambda x: x.fillna(method='ffill'), include_groups=False).reset_index(level=0, drop=False)   # 不可使用bfill，避免未来信息泄露
+        features = features.fillna(0)
+        features = features.reset_index(drop=True)
 
-        features.reset_index(inplace=True)
-        if 'index' in features.columns:
-            features.drop(columns=['index'], inplace=True)
+        # # 确保所有特征在合理范围内 (全局统计操作，保持不变)
+        # for col in features.columns:
+        #     if features[col].dtype in [np.float64, np.float32]:
+        #         mean = features[col].mean()
+        #         std = features[col].std()
+        #         lower_bound = mean - 5 * std
+        #         upper_bound = mean + 5 * std
+        #         features[col] = features[col].clip(lower=lower_bound, upper=upper_bound)
+
+        # 移除可能由 apply 引入的额外索引
+        features = features.sort_values(['date', 'order_book_id'])
         features.to_csv(output_path, index=False)
         return output_path
 

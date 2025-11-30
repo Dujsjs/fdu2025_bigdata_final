@@ -41,11 +41,14 @@ class RAGConfig(BaseModel):
 class financialDataConfig(BaseModel):
     update_frequency: int
     rice_quant_uri: str
-    features: dict
+    # features: dict
+    features_max_rolling_window: int
 
 class mlModelConfig(BaseModel):
-    va_para: dict
+    parameters: dict
     cv_fold: int
+    early_stopping_rounds: int
+    num_boost_rounds: int
 
 class PathsConfig(BaseModel):
     raw_data: str
