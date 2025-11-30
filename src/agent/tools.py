@@ -3,6 +3,7 @@ from llama_index.core.tools import FunctionTool, QueryEngineTool, ToolMetadata
 from src.services.rag_service import RAGService
 from src.services.ml_service import MLService
 from src.services.ricequant_service import RiceQuantService
+from src.services.ml_pack import MLPack, MLPackConfig
 
 # 惰性实例化（在需要时才创建服务实例）
 _rag_service = None
@@ -16,13 +17,11 @@ def get_rag_service():
         _rag_service = RAGService()
     return _rag_service
 
-
 def get_ml_service():
     global _ml_service
     if _ml_service is None:
         _ml_service = MLService()
     return _ml_service
-
 
 def get_ricequant_service():
     global _ricequant_service
@@ -51,7 +50,7 @@ def get_rag_tool():
 
 
 # --- 2. 机器学习分析类工具 ---
-def get_ml_tool():
+def get_contract_analysis_tool():
     """将 MLService 的预测功能包装成 LlamaIndex 函数工具"""
     ml_service = get_ml_service()
     def perform_investment_analysis(amount: float, risk_level: str) -> str:

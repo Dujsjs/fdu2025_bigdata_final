@@ -1,9 +1,6 @@
-import os
 import yaml
 from pathlib import Path
-from typing import Dict, Any
 from pydantic import BaseModel
-from dotenv import load_dotenv
 
 # --- 加载环境变量 ---
 # 获取当前文件 (src/core/load_config.py) 的父级目录，向上推导找到 config/.env
@@ -41,7 +38,6 @@ class RAGConfig(BaseModel):
 class financialDataConfig(BaseModel):
     update_frequency: int
     rice_quant_uri: str
-    # features: dict
     features_max_rolling_window: int
 
 class mlModelConfig(BaseModel):
@@ -54,7 +50,8 @@ class PathsConfig(BaseModel):
     raw_data: str
     financial_data: str
     processed_data: str
-    ml_models: str
+    trained_models: str
+    ml_packs: str
 
 class AppConfig(BaseModel):
     project: ProjectInfo

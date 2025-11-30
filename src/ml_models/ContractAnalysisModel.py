@@ -8,8 +8,9 @@ from sklearn.metrics import mean_absolute_error, r2_score
 from typing import Dict, List, Union
 from src.core.load_config import settings
 from src.services.ricequant_service import RiceQuantService
+import joblib
 
-class ContractValueAnalysisModel:
+class ContractAnalysisModel:
     """
     通用合约价值分析模型（支持5类合约）
 
@@ -19,7 +20,7 @@ class ContractValueAnalysisModel:
     3. 输出可解释的价值评分（0-100）
     """
 
-    def __init__(self):
+    def __init__(self, contract_type: str):
         # 合约类型特定参数
         self.contract_params = settings.mlModels.parameters
 
@@ -33,19 +34,21 @@ class ContractValueAnalysisModel:
         }
 
         self.model = None
+        self.model_performace = None
         self.shap_explainer = None
         self.is_trained = False
-        self.contract_type = None
+        self.contract_type = contract_type
         self.value_features = None
+        self.predict_days = None
         self.EARLY_STOPPING_ROUND = settings.mlModels.early_stopping_rounds
 
-    def train(self, X, y, contract_type):
+    def train(self, X, y):
         """
         训练价值分析模型
 
         参数:
         X: 特征矩阵
-        y: 目标变量（未来20日超额收益）
+        y: 目标变量
         contract_type: 合约类型
         cv_folds: 交叉验证折数
 
@@ -53,7 +56,6 @@ class ContractValueAnalysisModel:
         模型性能指标
         """
         # 2. 记录合约类型和特征
-        self.contract_type = contract_type
         self.value_features = X.columns.tolist()
 
         # 3. 时间序列交叉验证
@@ -145,11 +147,9 @@ class ContractValueAnalysisModel:
             'train_r2': np.mean(cv_results['train_r2']),
             'test_r2': np.mean(cv_results['test_r2']),
             'avg_n_estimators': avg_best_n_estimators,  # 增加平均最佳轮数
-            'sample_size': len(X),
-            'contract_type': contract_type
+            'sample_size': len(X)
         }
-
-        return performance
+        self.model_performace = performance
 
     def predict_excess_return(self, features: pd.Series) -> float:
         """预测未来20日超额收益"""
@@ -161,7 +161,6 @@ class ContractValueAnalysisModel:
     def predict_value_score(self, features: pd.Series) -> float:
         """预测投资价值评分（0-100分）"""
         predicted_excess_returns = self.predict_excess_return(features)
-        print(predicted_excess_returns)
         min_value, max_value = self.value_ranges[self.contract_type]
 
         # 映射到0-100分，使用Sigmoid或Sigmoid-like函数进行平滑，避免简单的线性截断
@@ -339,68 +338,122 @@ class ContractValueAnalysisModel:
             report_markdown.append(f"- **{item['feature']}** {impact}: {item['explanation']}")
 
         report_markdown.append("\n---")
-        report_markdown.append("模型由 XGBoost 训练，目标变量为未来20日超额收益。")
+        report_markdown.append(f"模型由 XGBoost 训练，目标变量为未来{self.predict_days}日超额收益。")
 
         return "\n".join(report_markdown)
 
+    def preprocess_features_data(self, features_data: pd.DataFrame, start_date:str, end_date:str, shibor_type:str, predict_days:int):
+        """
+        通用数据预处理函数
+
+        Args:
+            features_data (pd.DataFrame): 原始特征数据
+            start_date (str): 开始日期
+            end_date (str): 结束日期
+            shibor_type (str): Shibor利率类型，如'1W'
+            predict_days (int): 预测天数
+
+        Returns:
+            tuple: (X_train, y_train) 处理后的特征和目标变量
+        """
+        self.predict_days = predict_days
+
+        # 删除所有全零列
+        features_data = features_data.loc[:, ~(features_data == 0).all(axis=0)]
+
+        # 复制数据
+        data = features_data.copy()
+        x_col = data.columns.to_list()
+
+        # 确保按id和日期排序
+        features_data_sorted = features_data.sort_values(['order_book_id', 'date'])
+
+        # 计算未来收益（shift的天数与predict_days相关）
+        data['future_returns'] = features_data_sorted.groupby('order_book_id')['close'].transform(
+            lambda x: x.shift(-predict_days) / x - 1
+        )
+
+        # 分组缩尾操作（Winsorization）
+        def winsorize_series(series, lower_percentile=0.05, upper_percentile=0.95):
+            lower_bound = series.quantile(lower_percentile)
+            upper_bound = series.quantile(upper_percentile)
+            return series.clip(lower=lower_bound, upper=upper_bound)
+        data['future_returns'] = data.groupby('order_book_id')['future_returns'].transform(winsorize_series)
+
+        # 合并特征和目标变量（需要rice_quant_service实例）
+        rice_quant_service = RiceQuantService()
+        data = rice_quant_service.merge_shibor_data(data, start_date, end_date, [shibor_type], predict_days)
+        data['excess_returns'] = data['future_returns'] - data[shibor_type]
+
+        # 删除任何包含NaN的行
+        data = data.dropna()
+
+        # 分离X和y
+        X_train = data[x_col].set_index(['date', 'order_book_id'])
+        y_train = data[['date', 'order_book_id', 'excess_returns']].set_index(['date', 'order_book_id'])
+
+        return X_train, y_train
+
+    def save_model(self, file_path: str):
+        """
+        保存模型实例到本地文件
+        """
+        joblib.dump(self, file_path)
+        print(f"模型已保存至: {file_path}")
+
+    @classmethod
+    def load_model(cls, file_path: str):
+        """
+        从本地文件加载模型实例，此为类方法，可通过类名称直接调用
+        """
+        model_instance = joblib.load(file_path)
+        return model_instance
+
+
 if __name__ == '__main__':
-    rice_quant_service = RiceQuantService()
-
     # 1. 初始化模型
-    value_model = ContractValueAnalysisModel()
+    value_model = ContractAnalysisModel('CS')
     features_data = pd.read_csv(r"/root/nas-private/bigdata_final_project/data/processed/20240401_20251128_3d96b3a4bf_CS_features_data.csv")
-    features_data = features_data.loc[:, ~(features_data == 0).all(axis=0)]   # 删除所有全零列
 
-    # # 2. 准备训练数据（选择价值分析所需特征）
-    # all_features = settings.financial_data.features
-    # selected_features = all_features['Common_Features'] + all_features['Specific_Features']['CS']
-    # value_features = list(set(features_data.columns) & set(selected_features))
-
-    # 3. 定义目标变量 y (未来20日超额收益)
-    # 直接在原始数据上操作，保持顺序不变
-    data = features_data.copy()
-    x_col = data.columns.to_list()
-    features_data_sorted = features_data.sort_values(['order_book_id', 'date'])  # 确保按股票和日期排序
-    data['future_returns'] = features_data_sorted.groupby('order_book_id')['close'].transform(lambda x: x.shift(-5) / x - 1)
-
-    # 分组缩尾操作（Winsorization）
-    def winsorize_series(series, lower_percentile=0.05, upper_percentile=0.95):
-        lower_bound = series.quantile(lower_percentile)
-        upper_bound = series.quantile(upper_percentile)
-        return series.clip(lower=lower_bound, upper=upper_bound)
-    data['future_returns'] = data.groupby('order_book_id')['future_returns'].transform(winsorize_series)
-
-    # 合并特征和目标变量
-    data = rice_quant_service.merge_shibor_data(data, '20240401', '20251128', ['1W'], 3)
-    data['excess_returns'] = data['future_returns'] - data['1W']
-    # data['log_excess_returns'] = np.log(data['future_returns'] + 1) - np.log(data['1W'])
-
-    # 删除任何包含NaN的行
-    data = data.dropna()
-
-    # 分离X和y
-    X_train = data[x_col].drop(columns=['close', 'returns', 'log_returns'])
-    X_train = X_train.set_index(['date', 'order_book_id'])
-    y_train = data[['date', 'order_book_id', 'excess_returns']]
-    y_train = y_train.set_index(['date', 'order_book_id'])
+    # features_data = features_data.loc[:, ~(features_data == 0).all(axis=0)]   # 删除所有全零列
+    #
+    # # 3. 定义目标变量 y (未来20日超额收益)
+    # # 直接在原始数据上操作，保持顺序不变
+    # data = features_data.copy()
+    # x_col = data.columns.to_list()
+    # features_data_sorted = features_data.sort_values(['order_book_id', 'date'])  # 确保按股票和日期排序
+    # data['future_returns'] = features_data_sorted.groupby('order_book_id')['close'].transform(lambda x: x.shift(-5) / x - 1)
+    #
+    # # 分组缩尾操作（Winsorization）
+    # def winsorize_series(series, lower_percentile=0.05, upper_percentile=0.95):
+    #     lower_bound = series.quantile(lower_percentile)
+    #     upper_bound = series.quantile(upper_percentile)
+    #     return series.clip(lower=lower_bound, upper=upper_bound)
+    # data['future_returns'] = data.groupby('order_book_id')['future_returns'].transform(winsorize_series)
+    #
+    # # 合并特征和目标变量
+    # data = rice_quant_service.merge_shibor_data(data, '20240401', '20251128', ['1W'], 3)
+    # data['excess_returns'] = data['future_returns'] - data['1W']
+    #
+    # # 删除任何包含NaN的行
+    # data = data.dropna()
+    #
+    # # 分离X和y
+    # X_train = data[x_col].set_index(['date', 'order_book_id'])
+    # y_train = data[['date', 'order_book_id', 'excess_returns']]
+    # y_train = y_train.set_index(['date', 'order_book_id'])
 
     # 4. 训练模型
-    performance = value_model.train(X_train, y_train, contract_type="CS")  # 将"CS"替换为您的合约类型
+    X_train, y_train = value_model.preprocess_features_data(features_data, '20240401', '20251128', '1W', 3)
+    value_model.train(X_train, y_train)
     print("\n--- 模型训练性能 ---")
-    print(performance)
+    print(value_model.model_performace)
     print("---------------------------------")
 
-    # # 4. 预测并生成报告
-    # latest_features = X_train.iloc[-1].copy()  # 获取最新一行数据 (Series)
-    #
-    # # 模拟一些极端值以测试解释逻辑
-    # latest_features['ma_20d'] = 0.05  # 价格远高于均线
-    # latest_features['vol_ratio_20_60'] = 1.3  # 短期波动率极高
-    # latest_features['cvar_95'] = -0.06  # 尾部风险高
-    # latest_features['turnover_ratio'] = 2.0  # 换手率翻倍
-    #
-    # report = value_model.generate_investment_report(latest_features)
-    #
-    # print("\n--- 📝 最新投资分析报告 ---")
-    # print(report)
-    # print("-----------------------------")
+    # 4. 预测并生成报告
+    latest_features = X_train.iloc[-1].copy()  # 获取最新一行数据 (Series)
+    report = value_model.generate_investment_report(latest_features)
+
+    print("\n--- 📝 最新投资分析报告 ---")
+    print(report)
+    print("-----------------------------")

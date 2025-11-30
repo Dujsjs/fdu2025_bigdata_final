@@ -1,143 +1,9 @@
 import os
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Any
 from src.services.ricequant_service import RiceQuantService
 from src.core.load_config import settings
 import hashlib
-from dataclasses import dataclass
-
-@dataclass
-class MLPackConfig:
-    """
-    MLPack的配置信息，由用户指定
-    """
-    start_date: str
-    end_date: str
-    selected_instruments: List[str]
-
-@dataclass
-class MLPackAddresses:
-    """
-    MLPack中涉及的各种文件地址（绝对地址），MLPack初始化时自动生成
-    """
-    raw_data_addr: str = ""
-    features_data_addr: str = ""
-    value_analysis_model_addr: str = ""
-    risk_analysis_model_addr: str = ""
-    return_prediction_model_addr: str = ""
-
-class MLPack:
-    """
-    MLPack将配置、模型等信息打包到一起，每个类型的合约对应一个实例，
-    相当于总共最多有5个实例 (CS, ETF, INDX, Future, Option)
-    """
-    def __init__(self, contract_type: str, config: MLPackConfig):
-        """
-        初始化MLPack实例
-
-        Args:
-            contract_type: 合约类型 ('CS', 'ETF', 'INDX', 'Future', 'Option')
-            config: MLPack配置信息
-        """
-        # 配置和数据路径信息
-        self.contract_type = contract_type
-        self.config = config
-        self.addr = MLPackAddresses()
-
-        # 训练好的模型
-        self.trained_models = {
-            'value_analysis_model': None,
-            'risk_analysis_model': None,
-            'return_prediction_model': None
-        }
-        if self.addr.value_analysis_model_addr and self.addr.risk_analysis_model_addr and self.addr.return_prediction_model_addr:
-            self._load_models()
-
-        # 数据
-        self.raw_data = None
-        self.features_data = None
-        if self.addr.raw_data_addr:
-            self.raw_data = pd.read_csv(self.addr.raw_data_addr)
-        if self.addr.features_data_addr:
-            self.features_data = pd.read_csv(self.addr.features_data_addr)
-
-        print('MLPack 预加载完成')
-
-    def _train_value_analysis_model(self) -> Any:
-        """
-        训练价值分析模型
-        """
-        pass
-
-    def _train_risk_analysis_model(self) -> Any:
-        """
-        训练风险分析模型
-        """
-        pass
-
-    def _train_return_prediction_model(self) -> Any:
-        """
-        训练收益预测模型
-        """
-        pass
-
-    def _update_models(self, force_retrain: bool = False) -> None:
-        """
-        更新模型（若用户指定的合约与训练使用的合约数据不同，
-        则与用户对话，当用户确认需重新训练时调用该函数）
-
-        Args:
-            force_retrain: 是否强制重新训练
-        """
-        pass
-
-    def _load_models(self) -> None:
-        """
-        加载已训练的模型
-        """
-        pass
-
-    def _update_pack(self, new_config: MLPackConfig) -> None:
-        """
-        更新整个pack的配置和数据
-
-        Args:
-            new_config: 新的配置信息
-        """
-        pass
-
-    def do_analysis(self) -> Dict[str, Any]:
-        """
-        执行完整的分析流程
-
-        Returns:
-            分析结果字典
-        """
-        pass
-
-    def save_pack(self, save_path: str) -> None:
-        """
-        保存整个pack到指定路径
-
-        Args:
-            save_path: 保存路径
-        """
-        pass
-
-    @classmethod
-    def load_pack(cls, load_path: str) -> 'MLPack':
-        """
-        从指定路径加载pack
-
-        Args:
-            load_path: 加载路径
-
-        Returns:
-            MLPack实例
-        """
-        pass
-
 
 class MLService:
     """
@@ -146,11 +12,10 @@ class MLService:
     def __init__(self):
         self.ricequant_service = RiceQuantService()
         self.project_path = settings.project.project_dir
-        self.models_path = os.path.join(self.project_path, settings.paths.ml_models)
         self.features_data_path = os.path.join(self.project_path, settings.paths.processed_data)
         print("初始化 MLService 成功！")
 
-    def _construct_contract_features(
+    def construct_contract_features(
             self,
             contract_type: str,
             order_book_id: [str],
@@ -430,5 +295,5 @@ if __name__ == '__main__':
         "000034.XSHE",
         "000035.XSHE",
         "000036.XSHE"
-]
-    print(ml_service._construct_contract_features('CS', cs_list, '20240401', '20251128'))
+    ]
+    print(ml_service.construct_contract_features('CS', cs_list, '20240401', '20251128'))
