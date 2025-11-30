@@ -4,6 +4,7 @@ from src.services.rag_service import RAGService
 from src.services.ml_service import MLService
 from src.services.ricequant_service import RiceQuantService
 from src.services.ml_pack import MLPack, MLPackConfig
+from typing import List
 
 # 惰性实例化（在需要时才创建服务实例）
 _rag_service = None
@@ -52,18 +53,55 @@ def get_rag_tool():
 # --- 2. 机器学习分析类工具 ---
 def get_contract_analysis_tool():
     """将 MLService 的预测功能包装成 LlamaIndex 函数工具"""
-    ml_service = get_ml_service()
-    def perform_investment_analysis(amount: float, risk_level: str) -> str:
-        # 调用 MLService 的预测方法
-        result_dict = ml_service.predict(amount, risk_level)
-        return json.dumps(result_dict, ensure_ascii=False)
+    def contract_analysis(contract_type:str, selected_contracts_id:List[str], start_date:str, end_date:str, shibor_type:str, predict_days:int):
+        missing_params = []
+        if not contract_type:
+            missing_params.append("contract_type")
+        if not selected_contracts_id or len(selected_contracts_id) == 0:
+            missing_params.append("selected_contracts_id")
+        if not start_date:
+            missing_params.append("start_date")
+        if not end_date:
+            missing_params.append("end_date")
+        if not shibor_type:
+            missing_params.append("shibor_type")
+        if not predict_days:
+            missing_params.append("predict_days")
+        if missing_params:
+            return json.dumps({
+                'error': '参数缺失',
+                'missing_parameters': missing_params,
+                'message': f'以下参数缺失或为空: {", ".join(missing_params)}，请提供完整参数后再调用工具！'
+            }, ensure_ascii=False, indent=2)
+
+        config = MLPackConfig(
+            contract_type=contract_type,
+            selected_contracts_id=selected_contracts_id,
+            start_date=start_date,
+            end_date=end_date,
+            shibor_type=shibor_type,
+            predict_days=predict_days
+        )
+        pack = MLPack.load_or_build_pack(config)
+        report = pack.do_analysis()
+        return json.dumps({'分析报告': report}, ensure_ascii=False, indent=2)
 
     return FunctionTool.from_defaults(
-        fn=perform_investment_analysis,
-        name="financial_prediction_tool",
+        fn=contract_analysis,
+        name="contract_analysis_tool",
         description=(
-            "用于执行基于数据的分析和计算。当用户提供具体的投资金额和风险偏好，"
-            "并要求进行'预测'、'计算'或'分析收益'时，必须调用此工具。"
+            "用于对金融合约进行价值分析和预测。当用户需要对合约进行分析时，必须调用此工具。"
+            "**重要说明1：在调用此工具前，必须向用户索取并确认以下全部 6 个参数的精确值，在有参数未知时请勿调用工具，而应立即提问！**"
+            "**重要说明2：参数较多，可以依次向用户提问！**"
+            
+            "参数说明："
+            "contract_type: 合约类型，包括CS（股票）、ETF（交易所交易基金）、INDX（指数）、Future（期货）、Option（期权）；"
+            "selected_contracts_id: 选定的合约代码字符串列表，形如['000001.XSHE','000002.XSHE']"
+            "start_date: 分析开始日期（yyyymmdd格式）；"
+            "end_date: 分析结束日期（yyyymmdd格式）；"
+            "shibor_type: 基准Shibor利率类型（可选值为：ON（隔夜）、1W（1周）、2W（2周）、1M（1个月）、3M（3个月周）、6M（6个月周）、9M（9个月周）、1M（1年））"
+            "predict_days: 表示希望预测未来多少日的超额收益率"
+            "工具会自动判断是否需要重新训练模型，如果配置发生变化则会重新构建模型。"
         )
     )
 
@@ -86,4 +124,4 @@ def get_instruments_data_tool():
 
 def get_all_tools():
     """返回所有可用的工具列表"""
-    return [get_rag_tool(), get_ml_tool(), get_instruments_data_tool()]
+    return [get_rag_tool(), get_contract_analysis_tool(), get_instruments_data_tool()]
