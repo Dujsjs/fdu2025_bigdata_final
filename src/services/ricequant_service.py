@@ -269,30 +269,34 @@ class RiceQuantService:
                         return json.dumps(row, ensure_ascii=False, indent=2)
         return json.dumps({}, ensure_ascii=False, indent=2)
 
-    def instruments_features_fetching(self, type, start_date, end_date):
+    def instruments_data_fetching(self, type, features_list, start_date, end_date, order_book_id_list=None):
         """
         自动根据用户选择的合约类型、数据时间范围进行下载/增量更新最新数据
-        :param type:
-        :param start_date:
-        :param end_date:
-        :return:数据地址、可使用的列字段
+        :param type: 合约类型
+        :param features_list: 特征列表
+        :param start_date: int起始日期，yyyymmdd
+        :param end_date: int终止日期，yyyymmdd
+        :param order_book_id_list: order_book_id列表
+        :return: dataframe数据框
         """
-        shared_FIELDS_LIST = [
-            'close', 'high', 'low', 'total_turnover', 'volume', 'prev_close'
-        ]
-        optional_FIELDS_LIST = {'CS':['num_trades'],
-                                'ETF':['num_trades'],
-                                'INDX':[],
-                                'Future':['open_interest', 'settlement'],
-                                'Option':['strike_price', 'contract_multiplier']}
-        try:
-            fields_list = shared_FIELDS_LIST.extend(optional_FIELDS_LIST[type])
-        except:
-            print("输入的type有误！")
-            fields_list = shared_FIELDS_LIST
-
-        data_addr = self._update_price_data(instru_type=type, start_date=start_date, end_date=end_date, fields=fields_list)
-        return data_addr, fields_list
+        data_addr = self._update_price_data(instru_type=type, start_date=start_date, end_date=end_date, fields=features_list)
+        data = pd.read_csv(data_addr)
+        data['date'] = pd.to_datetime(data['date'])
+        start_date = datetime.strptime(str(start_date), "%Y%m%d")
+        end_date = datetime.strptime(str(end_date), "%Y%m%d")
+        if order_book_id_list is not None:
+            data = data[
+                (data['order_book_id'].isin(order_book_id_list)) &
+                (data['date'] >= start_date) &
+                (data['date'] <= end_date)
+                ]
+        else:
+            data = data[
+                (data['date'] >= start_date) &
+                (data['date'] <= end_date)
+                ]
+        data.reset_index(inplace=True, drop=True)
+        return data
 
     def _update_shibor_data(self, start_date, end_date, shibor_range=['ON', '1W', '2W']):
         # 处理日期参数
@@ -373,8 +377,20 @@ if __name__ == '__main__':
     # print(tmp._get_instruments_list('CS'))
     # print(tmp._update_price_data('CS'))
     # print(tmp._update_price_data(instru_type='CS', start_date=20251124, end_date=20251128))
-    FIELDS_LIST = [
-        'close', 'high', 'low', 'total_turnover', 'volume', 'prev_close'
-    ]
-    print(tmp._update_price_data(instru_type='CS', start_date=20251124, end_date=20251128, fields=FIELDS_LIST))
-    print(tmp._update_shibor_data(start_date=20251124, end_date=20251128, shibor_range=['1W']))
+
+    # FIELDS_LIST = [
+    #     'close', 'high', 'low', 'total_turnover', 'volume', 'prev_close'
+    # ]
+    # print(tmp._update_price_data(instru_type='CS', start_date=20251124, end_date=20251128, fields=FIELDS_LIST))
+    # print(tmp._update_shibor_data(start_date=20251124, end_date=20251128, shibor_range=['1W']))
+
+    # print(tmp._update_price_data(instru_type='CS', start_date=20250601, end_date=20251128, fields=['open', 'close', 'high', 'low', 'limit_up', 'limit_down', 'total_turnover', 'volume', 'num_trades', 'prev_close']))
+    # print(tmp._update_price_data(instru_type='ETF', start_date=20250601, end_date=20251128, fields=['open', 'close', 'high', 'low', 'total_turnover', 'volume', 'num_trades', 'prev_close', 'iopv']))
+    # print(tmp._update_price_data(instru_type='INDX', start_date=20250601, end_date=20251128, fields=['open', 'close', 'high', 'low']))
+    # print(tmp._update_price_data(instru_type='Future', start_date=20250601, end_date=20251128, fields=['open', 'close', 'high', 'low', 'settlement', 'prev_settlement', 'open_interest', 'volume', 'total_turnover']))
+    # print(tmp._update_price_data(instru_type='Option', start_date=20250601, end_date=20251128, fields=['open', 'close', 'high', 'low', 'settlement', 'prev_settlement', 'open_interest', 'volume', 'strike_price', 'contract_multiplier']))
+
+    print(tmp.instruments_data_fetching(type='CS', start_date=20251001, end_date=20251128, features_list=['open', 'close', 'high', 'low', 'limit_up', 'limit_down', 'total_turnover', 'volume', 'num_trades', 'prev_close'], order_book_id_list=['000001.XSHE', '000002.XSHE']))
+
+
+
