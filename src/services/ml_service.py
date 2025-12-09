@@ -493,7 +493,7 @@ class MLService:
         # 4. 综合总结输出（修改这部分以包含相对分析）
         # ======================
         summary = f"""
-        【{target_stock_id} 深度趋势分析报告】（{stock_df['date'].min().strftime('%Y-%m-%d')} 至 {stock_df['date'].max().strftime('%Y-%m-%d')}）
+        【{target_stock_id} 深度趋势分析报告】（截至 {stock_df['date'].max().strftime('%Y-%m-%d')}）
     
         🌍 市场相对定位（基于{len(market_df)}只股票最新数据）：
         - 机构参与度：{inst_relative_desc}
@@ -823,39 +823,9 @@ class MLService:
 
 if __name__ == '__main__':
     ml_service = MLService()
-    # cs_list = [
-    #     "000001.XSHE",
-    #     "000002.XSHE",
-    #     "000004.XSHE",
-    #     "000006.XSHE",
-    #     "000007.XSHE",
-    #     "000008.XSHE",
-    #     "000009.XSHE",
-    #     "000010.XSHE",
-    #     "000011.XSHE",
-    #     "000012.XSHE",
-    #     "000014.XSHE",
-    #     "000016.XSHE",
-    #     "000017.XSHE",
-    #     "000019.XSHE",
-    #     "000020.XSHE",
-    #     "000021.XSHE",
-    #     "000025.XSHE",
-    #     "000026.XSHE",
-    #     "000027.XSHE",
-    #     "000028.XSHE",
-    #     "000029.XSHE",
-    #     "000030.XSHE",
-    #     "000031.XSHE",
-    #     "000032.XSHE",
-    #     "000034.XSHE",
-    #     "000035.XSHE",
-    #     "000036.XSHE"
-    # ]
+    cs_list = ['000001.XSHE', '000002.XSHE', '000004.XSHE']
     # print(ml_service.construct_contract_features('CS', cs_list, '20240401', '20251128'))
-
-    if __name__ == "__main__":
-        print(ml_service.summarize_CSanalysis(start_date=20250401,
-           end_date=20251128,
-           target_stock_id='000002.XSHE',
-           order_book_id_list=['000001.XSHE', '000002.XSHE', '000004.XSHE']))
+    print(ml_service.summarize_CSanalysis(start_date=20250401,
+       end_date=20251128,
+       target_stock_id='000002.XSHE',
+       order_book_id_list=cs_list))

@@ -1,19 +1,19 @@
 from llama_index.core.agent import ReActAgent
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core import Settings
-from src.agent.tools import get_all_tools
+from src.agent.tools import get_all_rag_tools
 
 
-def create_invest_agent():
+def create_invest_rag_agent():
     """
     创建并返回具备多轮信息收集和工具调用的金融 ReAct Agent。
     """
 
     if Settings.llm is None:
-        raise RuntimeError("LLM 尚未初始化。请确保 LLMService 已被调用。")
+        raise RuntimeError("LLM 尚未初始化。请确保LLMService已被调用。")
 
     # 1. 获取所有工具
-    tools = get_all_tools()
+    tools = get_all_rag_tools()
 
     # 2. 配置记忆 (用于多轮对话)
     memory = ChatMemoryBuffer.from_defaults(
@@ -42,6 +42,5 @@ def create_invest_agent():
         system_prompt=FINANCIAL_SYSTEM_PROMPT
     )
 
-    # ReActAgent 的 chat() 方法已经具备多轮对话和工具调用的能力
-    print("Agent: ReAct Agent (具备多轮对话信息收集能力) 组装完成。")
+    # print("Agent: ReAct Agent (具备多轮对话信息收集能力) 组装完成。")
     return agent

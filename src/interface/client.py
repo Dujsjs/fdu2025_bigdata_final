@@ -1,8 +1,10 @@
-from src.agent.chat_engine import create_invest_agent
+from src.agent.chat_engine import create_invest_rag_agent
 from src.services.llm_service import init_llm_and_embed_models
 from src.agent.tools import get_rag_service
 import asyncio
 from src.services.intent_recognition import intent_recognition
+from src.services.params_fetching import get_param_CSanalysis
+from src.services.ml_service import MLService
 
 async def main_async():
     # 1. 初始化 LLM 和 Embedding 模型 (保持不变)
@@ -21,14 +23,18 @@ async def main_async():
         print(f"致命错误：RAG 索引加载或构建失败。请检查 data/raw 和 data/storage 目录。错误: {e}")
         return
 
-    # 3. 创建llamaindex自身预设的Agent
-    # invest_agent = create_invest_agent()
+    # 3. 初始化 MLService
+    print("初始化机器学习服务...")
+    try:
+        ml_service = MLService()
+    except Exception as e:
+        print(f"致命错误：机器学习服务初始化失败。错误: {e}")
 
+    # 4. 进入循环聊天
     print("\n--- AI 投资顾问启动成功 ---")
     print("输入 'exit' 或 'quit' 退出。")
     print("您可以在下方的输入框中简要描述您的需求\n目前支持的金融产品有：股票、基金、指数、期货、期权\n支持的功能有：金融建模与收益预测、投资价值分析、金融知识查询")
 
-    # 4. 进入循环聊天
     while True:
         try:
             user_input = input("\n👤 您: ")
@@ -38,13 +44,34 @@ async def main_async():
 
             print("思考中...(正在推理和调度工具)")
             intent_rst = intent_recognition(user_input)
+            print(f"任务列表：{intent_rst}")
+            final_answer = ''
+            for job in intent_rst:
+                job_type = job['job_type']
+                user_query = job['user_query']
+                additional_info = job['additional_info']
+                if job_type == 'rag':
+                    invest_agent = create_invest_rag_agent()
+                    response = await invest_agent.run(user_query)
+                    final_answer += str(response.response)+'\n'+'\n'
+                elif job_type == 'ml':
+                    if user_query == 'CS':
+                        cs_params = get_param_CSanalysis()
+                        cs_analysis = str(ml_service.summarize_CSanalysis(start_date=cs_params['start_date'],
+                                                        end_date=cs_params['end_date'],
+                                                        target_stock_id=cs_params['target_stock_id'],
+                                                        order_book_id_list=cs_params['order_book_id_list']))
+                        final_answer += cs_analysis+'\n'+'\n'
+                    elif user_query == 'ETF':
+                        pass
+                    elif user_query == 'INDX':
+                        pass
+                    elif user_query == 'Future':
+                        pass
+                    elif user_query == 'Option':
+                        pass
 
-
-
-            # response = await invest_agent.run(user_input)
-            # final_answer = response.response
-            print(f"\n🤖 顾问: {intent_rst}")
-
+            print(f"\n🤖 顾问: {final_answer}")
         except Exception as e:
             print(f"\n❌ 发生错误: {e}")
             if "out of memory" in str(e).lower():

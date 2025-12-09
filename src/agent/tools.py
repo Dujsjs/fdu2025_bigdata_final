@@ -122,6 +122,6 @@ def get_instruments_data_tool():
         )
     )
 
-def get_all_tools():
+def get_all_rag_tools():
     """返回所有可用的工具列表"""
-    return [get_rag_tool(), get_contract_analysis_tool(), get_instruments_data_tool()]
+    return [get_rag_tool()]

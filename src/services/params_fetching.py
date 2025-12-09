@@ -127,7 +127,7 @@ def get_param_CSanalysis():
         "start_date": None,
         "end_date": None,
         "target_stock_id": None,
-        "order_book_id_list": []
+        "order_book_id_list": None
     }
     has_mem = False
     need_refreshment = False
@@ -145,6 +145,12 @@ def get_param_CSanalysis():
         temp_judge = input('您是否需要指定新的参数(Y/N)？')
         if temp_judge == 'Y':
             need_refreshment = True
+            data_dict = {
+                "start_date": None,
+                "end_date": None,
+                "target_stock_id": None,
+                "order_book_id_list": None
+            }
         else:
             print("继续使用历史记忆中的分析参数！")
     else:
