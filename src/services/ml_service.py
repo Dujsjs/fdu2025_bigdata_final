@@ -187,7 +187,7 @@ class MLService:
         # }
         return results
 
-    def summarize_analysis_trends(self, start_date: int, end_date: int, target_stock_id=None,
+    def summarize_CSanalysis(self, start_date: int, end_date: int, target_stock_id=None,
                                   order_book_id_list: list = None, lookback_days=30, confidence_level=0.95):
         """
         对深度分析指标进行时间序列趋势分析，识别动态模式与领先-滞后关系
@@ -855,7 +855,7 @@ if __name__ == '__main__':
     # print(ml_service.construct_contract_features('CS', cs_list, '20240401', '20251128'))
 
     if __name__ == "__main__":
-        print(ml_service.summarize_analysis_trends(start_date=20250401,
-                                                   end_date=20251128,
-                                                   target_stock_id='000002.XSHE',
-                                                   order_book_id_list=['000001.XSHE', '000002.XSHE', '000003.XSHE', '000004.XSHE']))
+        print(ml_service.summarize_CSanalysis(start_date=20250401,
+           end_date=20251128,
+           target_stock_id='000002.XSHE',
+           order_book_id_list=['000001.XSHE', '000002.XSHE', '000004.XSHE']))

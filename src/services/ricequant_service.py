@@ -290,7 +290,7 @@ class RiceQuantService:
                 (data['date'] >= start_date) &
                 (data['date'] <= end_date)
                 ]
-        else:
+        else:    # 不给order_book_id_list的情况下默认取全部数据
             data = data[
                 (data['date'] >= start_date) &
                 (data['date'] <= end_date)

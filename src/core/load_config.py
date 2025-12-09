@@ -13,6 +13,9 @@ class ProjectInfo(BaseModel):
     author: str
     project_dir: str
 
+class IRConfig(BaseModel):
+    max_loop: int
+
 class LLMConfig(BaseModel):
     model_name: str
     model_dir: str
@@ -52,9 +55,11 @@ class PathsConfig(BaseModel):
     processed_data: str
     trained_models: str
     ml_packs: str
+    memories: str
 
 class AppConfig(BaseModel):
     project: ProjectInfo
+    intent_recognition: IRConfig
     llm: LLMConfig
     embedding: EmbeddingConfig
     financial_data: financialDataConfig
