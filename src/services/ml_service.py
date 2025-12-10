@@ -20,7 +20,7 @@ class MLService:
 
     def _analyze_CS(self, start_date:int, end_date:int, order_book_id_list: list = None):
         """
-        对股票日线数据进行深度分析
+        对股票日线数据进行深度分析（基于TVP-SSM模型）
         :param start_date: yyyymmdd，int型
         :param end_date: yyyymmdd，int型
         :return: 包含所有关键指标的dict列表
@@ -571,261 +571,793 @@ class MLService:
 
         return summary
 
-    def construct_contract_features(
-            self,
-            contract_type: str,
-            order_book_id: [str],
-            start_date: str,
-            end_date: str,
-    ) -> str:
+    def _analyze_ETF(self, start_date:int, end_date:int, order_book_id_list: list = None):
         """
-        构建适用于多种合约类型的全面特征集，不涉及聚合操作
-        :param order_book_id: 用户指定的合约代码列表，仅对此部分样本开展特征工程
-        :param contract_type: 合约类型 ('CS', 'ETF', 'INDX', 'Future', 'Option')
-        :param start_date: 数据的起始日期
-        :param end_date: 数据的终止日期
-        :return: 包含所有特征的DataFrame的存储地址
+        对ETF日线数据进行深度分析，输出包含所有关键指标的字典列表
         """
-        df_addr, df_fields = self.ricequant_service.instruments_features_fetching(contract_type, int(start_date), int(end_date))
-        df = pd.read_csv(df_addr)
-        order_book_id_str = None
-        if order_book_id:
-            order_book_id_str = ','.join(sorted(order_book_id))
-        order_book_id_hash = hashlib.md5(order_book_id_str.encode('utf-8')).hexdigest()[:10]
-        output_path = os.path.join(self.features_data_path, f"{start_date}_{end_date}_{order_book_id_hash}_{contract_type}_features_data.csv")
-        if os.path.exists(output_path):
-            print("特征文件已存在！")
-            return output_path
-        else:
-            print("特征文件不存在，开始生成")
+        etf_features_list = ['open', 'close', 'high', 'low', 'total_turnover', 'volume', 'num_trades', 'prev_close', 'iopv']
+        df = self.ricequant_service.instruments_data_fetching(type='ETF', start_date=start_date, end_date=end_date, features_list=etf_features_list, order_book_id_list=order_book_id_list)
 
-        # 1. 基础数据验证并选择合适的样本&按时间排序
-        if df.empty:
-            raise ValueError("输入数据为空")
-        if order_book_id and 'order_book_id' in df.columns:     # 筛选出order_book_id在给定列表中的行
-            df = df[df['order_book_id'].isin(order_book_id)]
-        if 'date' in df.columns:
-            df = df.sort_values(['date', 'order_book_id'])   # 整体数据优先【按照时间排序】
+        # 确保日期格式正确并排序
+        df['date'] = pd.to_datetime(df['date'], format='%Y/%m/%d')
+        df = df.sort_values(['order_book_id', 'date']).reset_index(drop=True)
 
-        # 2. 标准化列名（处理可能的大小写差异）
-        df = df.copy()
-        df.columns = [col.lower() for col in df.columns]
+        # 计算基础指标
+        # 日溢价率 (核心指标)
+        df['daily_premium_rate'] = (df['close'] - df['iopv']) / df['iopv']
 
-        # 3. 按合约类型构造特征
-        if contract_type not in ['CS', 'ETF', 'INDX', 'Future', 'Option']:
-            raise ValueError(f"不支持的合约类型: {contract_type}. 必须是 CS, ETF, INDX, Future, Option")
-
-        # 4. 初始化特征DataFrame
-        features = pd.DataFrame(index=df.index)
-        features['date'] = df['date']
-        features['order_book_id'] = df['order_book_id']
-        features['close'] = df['close']
-
-        # 关键步骤：创建分组对象
-        grouped = df.groupby('order_book_id')
-
-        """ ===== 共享基础特征 (所有合约类型) ===== """
-        # 价格特征
-        features['returns'] = grouped['close'].transform(lambda x: x.pct_change())
-        features['log_returns'] = grouped['close'].transform(lambda x: np.log(x / x.shift(1)))
-
-        df['returns'] = features['returns']     # 无需重新创建 grouped，因为 df 已经更新，grouped 会在访问时使用 df 的最新列
-        df['log_returns'] = features['log_returns']
-
-        # 波动率特征
-        features['vol_10d'] = grouped['returns'].transform(lambda x: x.rolling(10).std()) * np.sqrt(252)
-        features['vol_20d'] = grouped['returns'].transform(lambda x: x.rolling(20).std()) * np.sqrt(252)
-        features['vol_60d'] = grouped['returns'].transform(lambda x: x.rolling(60).std()) * np.sqrt(252)
-        features['vol_ratio_20_60'] = features['vol_20d'] / features['vol_60d']  # 波动率斜率
-
-        # 趋势特征
-        features['ma_5d'] = grouped['close'].transform(lambda x: x / x.rolling(5).mean() - 1)
-        features['ma_20d'] = grouped['close'].transform(lambda x: x / x.rolling(20).mean() - 1)
-        features['ma_60d'] = grouped['close'].transform(lambda x: x / x.rolling(60).mean() - 1)
-
-        # 动量特征
-        df['ma_20d'] = features['ma_20d']
-        features['ma_momentum'] = grouped['ma_20d'].transform(lambda x: x - x.shift(5))
-
-        # 真实波幅特征
-        if 'high' in df.columns and 'low' in df.columns and 'prev_close' in df.columns:
-            # 真实波幅计算
-            def calculate_true_range(group):
-                prev_close_shifted = group['prev_close'].shift(1)
-                true_range_val = np.maximum(
-                    group['high'] - group['low'],
-                    np.maximum(
-                        abs(group['high'] - prev_close_shifted),
-                        abs(group['low'] - prev_close_shifted)
-                    )
-                )
-                # 使用前一日收盘价计算百分比TR，注意分母也需要 shift(1)
-                return true_range_val / group['prev_close'].shift(1)
-
-            features['true_range'] = grouped.apply(calculate_true_range, include_groups=False).reset_index(level=0, drop=True)
-            # ATR
-            df['true_range'] = features['true_range']
-            features['atr_14d'] = grouped['true_range'].transform(lambda x: x.rolling(14).mean())
-
-        """ ===== 按合约类型添加特定特征 ===== """
-        if contract_type in ['CS', 'ETF']:
-            """ ===== 股票/ETF 特有特征 ===== """
-            # 量能特征
-            if 'volume' in df.columns:
-                # 滚动均值
-                features['volume_10d_ma'] = grouped['volume'].transform(lambda x: x.rolling(10).mean())
-                features['volume_ratio'] = df['volume'] / features['volume_10d_ma']
-                # 动量
-                df['volume_ratio'] = features['volume_ratio']
-                features['volume_momentum'] = grouped['volume_ratio'].transform(lambda x: x - x.shift(5))
-
-            if 'total_turnover' in df.columns:
-                # 换手率与均值比
-                features['turnover_ratio'] = grouped['total_turnover'].transform(lambda x: x / x.rolling(30).mean())
-
-            # 交易活跃度特征
-            if 'num_trades' in df.columns:
-                features['trade_frequency'] = df['num_trades'] / df['volume']
-                # 20日均值
-                df['trade_frequency'] = features['trade_frequency']
-                features['trade_frequency_20d_ma'] = grouped['trade_frequency'].transform(lambda x: x.rolling(20).mean())
-                features['trade_frequency_ratio'] = features['trade_frequency'] / features['trade_frequency_20d_ma']
-
-            # 市场状态特征
-            if all(col in df.columns for col in ['close', 'limit_up', 'limit_down']):
-                features['is_limit_up'] = (df['close'] >= df['limit_up'] * 0.995).astype(int)
-                features['is_limit_down'] = (df['close'] <= df['limit_down'] * 1.005).astype(int)
-                # 20日计数
-                df['is_limit_up'] = features['is_limit_up']
-                df['is_limit_down'] = features['is_limit_down']
-                features['limit_up_count_20d'] = grouped['is_limit_up'].transform(lambda x: x.rolling(20).sum())
-                features['limit_down_count_20d'] = grouped['is_limit_down'].transform(lambda x: x.rolling(20).sum())
-
-            # 换手率特征（股票特有）：此处涉及外部数据，分组处理难度大，保持原逻辑但需注意外部数据对齐
-            features['turnover_rate_approx'] = df['total_turnover'] / (df['close'] * df['volume'])
-            df['turnover_rate_approx'] = features['turnover_rate_approx']
-
-        elif contract_type == 'INDX':
-            """ ===== 指数特有特征 ===== """
-            # 市场广度指标
-            if 'high' in df.columns and 'low' in df.columns:
-                # 指数波动范围
-                features['index_range'] = grouped[['high', 'low', 'close']].apply(
-                    lambda x: (x['high'] - x['low']) / x['close'].shift(1),
-                    include_groups=False
-                ).reset_index(level=0, drop=True)
-                # 20日均值
-                df['index_range'] = features['index_range']
-                features['index_range_20d_ma'] = grouped['index_range'].transform(lambda x: x.rolling(20).mean())
-
-            # 指数动量强度
-            features['index_momentum_strength'] = features['returns'] / features['vol_20d']
-
-        elif contract_type in ['Future', 'Option']:
-            """ ===== 期货/期权特有特征 ===== """
-            # 持仓量特征（期货/期权）
-            if 'open_interest' in df.columns:
-                # 1日/5日变化
-                features['oi_1d_change'] = grouped['open_interest'].transform(lambda x: x.pct_change())
-                features['oi_5d_change'] = grouped['open_interest'].transform(lambda x: x.pct_change(5))
-                # 动量
-                df['oi_1d_change'] = features['oi_1d_change']
-                features['oi_momentum'] = grouped['oi_1d_change'].transform(lambda x: x - x.rolling(5).mean())
-
-            settlement_col = 'settlement' if 'settlement' in df.columns else 'close'
-            features['settlement'] = df[settlement_col]
-
-            # 期货特有特征：基差和期限结构涉及多个合约的数据对齐，此处保持原逻辑？？？？
-
-        elif contract_type == 'Option':
-            # 行权价相关特征
-            if 'strike_price' in df.columns:
-                features['moneyness'] = df['close'] / df['strike_price']
-                # 20日均值
-                df['moneyness'] = features['moneyness']
-                features['moneyness_20d_ma'] = grouped['moneyness'].transform(lambda x: x.rolling(20).mean())
-                features['moneyness_deviation'] = features['moneyness'] - features['moneyness_20d_ma']
-            # 隐含波动率估算（简化版）
-            if 'strike_price' in df.columns and 'settlement' in df.columns:
-                time_to_expiry = 30
-                # 隐含波动率的计算不涉及滚动或 shift，但使用 apply 确保在组内操作
-                features['implied_vol'] = grouped[['settlement', 'strike_price']].apply(
-                    lambda x: np.sqrt(2 * np.pi / time_to_expiry) * (x['settlement'] / x['strike_price']),
-                    include_groups=False
-                ).reset_index(level=0, drop=True)
-
-        """ ===== 所有合约类型通用的高级特征 ===== """
-        # 风险调整收益
-        # 夏普比率
-        features['sharpe_20d'] = grouped['returns'].transform(lambda x: x.rolling(20).mean()) / features[
-            'vol_20d'] * np.sqrt(252)
-        df['sharpe_20d'] = features['sharpe_20d']
-
-        # 波动率状态 (qcut 是全局操作，无需分组计算)
-        features['vol_regime'] = pd.qcut(features['vol_20d'], q=5, labels=False, duplicates='drop') / 4
-        df['vol_regime'] = features['vol_regime']
-
-        # 趋势强度
-        trend_window = 20
-        # 滚动标准差和均值
-        price_std = grouped['close'].transform(lambda x: x.rolling(trend_window).std())
-        price_mean = grouped['close'].transform(lambda x: x.rolling(trend_window).mean())
-        features['trend_strength'] = (df['close'] - price_mean) / (price_std + 1e-10)
-        df['trend_strength'] = features['trend_strength']
-
-        # 尾部风险指标
-        # VaR
-        features['var_95'] = grouped['returns'].transform(lambda x: x.rolling(60).quantile(0.05))
-        df['var_95'] = features['var_95']
-
-        # CVaR(条件风险价值)
-        df['cvar_returns_filtered'] = features['returns'].where(features['returns'] <= features['var_95'])
-        features['cvar_95'] = grouped['cvar_returns_filtered'].transform(lambda x: x.rolling(60, min_periods=1).mean())   # 在每个合约分组内，对过滤后的（稀疏）收益率计算滚动平均。
-        df.drop(columns=['cvar_returns_filtered'], inplace=True)
-
-        # 市场状态综合指标 (基于已分组计算的特征，无需再分组)
-        features['market_regime'] = (
-            0.4 * features['vol_regime'] +
-            0.3 * abs(features['trend_strength']) +
-            0.3 * (1 - features['sharpe_20d'].clip(lower=0, upper=1))
+        # iopv稳定性 (替代日内波动率)
+        price_range = (df['high'] - df['low']).replace(0, np.nan)
+        df['iopv_stability'] = np.where(
+            price_range.notna(),
+            1 - (df['iopv'] - df['close']).abs() / price_range,
+            np.nan
         )
 
-        """ ===== 特征工程后处理 ===== """
-        MAX_ROLLING_WINDOW = settings.financial_data.features_max_rolling_window
-        features = features.groupby('order_book_id').apply(
-            lambda x: x.iloc[MAX_ROLLING_WINDOW:, :],
-            include_groups=False
-        ).reset_index(level=0, drop=False)      # 按 order_book_id 分组，丢弃每个分组的前 MAX_ROLLING_WINDOW 行
-        features = features.reset_index(drop=True)
-        features = features.replace([np.inf, -np.inf], np.nan)
+        # ETF日收益率
+        df['etf_return'] = df['close'] / df['prev_close'] - 1
 
-        # 填充必须在分组后进行，以避免使用下一只股票的数据填充前一只股票的NaN
-        features_grouped_for_fillna = features.groupby('order_book_id')
-        features = features_grouped_for_fillna.apply(
-            lambda x: x.fillna(method='ffill'), include_groups=False).reset_index(level=0, drop=False)   # 不可使用bfill，避免未来信息泄露
-        features = features.fillna(0)
-        features = features.reset_index(drop=True)
+        # 无指数数据时的替代方案
+        df['tracking_error'] = np.nan
+        df['index_volatility'] = np.nan
+        df['actual_tracking_cost'] = np.nan
 
-        # # 确保所有特征在合理范围内 (全局统计操作，保持不变)
-        # for col in features.columns:
-        #     if features[col].dtype in [np.float64, np.float32]:
-        #         mean = features[col].mean()
-        #         std = features[col].std()
-        #         lower_bound = mean - 5 * std
-        #         upper_bound = mean + 5 * std
-        #         features[col] = features[col].clip(lower=lower_bound, upper=upper_bound)
+        # 3. 溢价持续性 (考虑成交量)
+        df['volume_ma_20'] = df['volume'].rolling(20, min_periods=10).mean()
+        df['premium_persistence'] = df['daily_premium_rate'] * (df['volume'] / df['volume_ma_20'])
 
-        # 移除可能由 apply 引入的额外索引
-        features = features.sort_values(['date', 'order_book_id'])
-        features.to_csv(output_path, index=False)
-        return output_path
+        # 4. 溢价率与成交量的相关性 (用于流动性危机预警)
+        df['premium_vol_corr'] = df['daily_premium_rate'].rolling(20, min_periods=10).corr(df['volume'])
+
+        # 5. 简化版误差修正项 (模拟EC term)
+        # 原理：溢价率向0回归的速度，值越大表示回归越快
+        df['ec_term'] = np.nan
+
+        # 仅当有足够数据时计算
+        for i in range(20, len(df)):
+            window_premium = df['daily_premium_rate'].iloc[i - 19:i + 1]
+            # 计算溢价率的均值回归系数（简化版EC term）
+            if len(window_premium) >= 10 and not window_premium.isna().all():
+                try:
+                    # 用昨日溢价率预测今日溢价率，回归系数反映均值回归速度
+                    x = window_premium.iloc[:-1].values
+                    y = window_premium.iloc[1:].values
+                    slope, _, _, _, _ = stats.linregress(x, y)
+                    # EC term = 1 - slope (正值表示均值回归)
+                    df.iloc[i, df.columns.get_loc('ec_term')] = 1 - slope
+                except:
+                    pass
+
+        # 6. 风险预警信号
+        df['risk_alert'] = False
+
+        # 条件1：溢价率持续3日 > 0.5%
+        premium_high = (df['daily_premium_rate'] > 0.005)
+        df['premium_high_streak'] = premium_high.astype(int).groupby((~premium_high).cumsum()).cumsum()
+
+        # 条件2：实际跟踪成本 > 指数波动率15%
+        if 'index_volatility' in df and 'actual_tracking_cost' in df:
+            cost_to_vol_ratio = df['actual_tracking_cost'] / df['index_volatility']
+            high_cost = cost_to_vol_ratio > 1.15  # 比指数波动率高15%
+
+            # 风险预警：满足两个条件
+            df['risk_alert'] = (df['premium_high_streak'] >= 3) & high_cost
+
+        # 7. 套利机会信号
+        df['arbitrage_opportunity'] = False
+        if 'ec_term' in df:
+            # 套利窗口期：当 |EC term| > 0.5 且 溢价率 > 0.3%
+            df['arbitrage_opportunity'] = (df['ec_term'].abs() > 0.5) & (df['daily_premium_rate'].abs() > 0.003)
+
+        # 8. 流动性危机预警
+        df['liquidity_crisis_warning'] = False
+        if 'premium_vol_corr' in df and 'ec_term' in df:
+            # 当溢价率与volume负相关（Pearson < -0.4），且EC term趋近0
+            df['liquidity_crisis_warning'] = (df['premium_vol_corr'] < -0.4) & (df['ec_term'].abs() < 0.1)
+
+        # 9. 构建结果字典
+        results = []
+        for _, row in df.iterrows():
+            result = {
+                "date": row['date'].strftime('%Y-%m-%d'),
+                "order_book_id": row['order_book_id'],
+                "daily_premium_rate": float(row['daily_premium_rate']),
+                "iopv_stability": float(row['iopv_stability']) if not pd.isna(row['iopv_stability']) else None,
+                "etf_return": float(row['etf_return']),
+                "premium_persistence": float(row['premium_persistence']) if not pd.isna(
+                    row['premium_persistence']) else None,
+                "tracking_error": float(row['tracking_error']) if not pd.isna(row['tracking_error']) else None,
+                "index_volatility": float(row['index_volatility']) if not pd.isna(
+                    row['index_volatility']) else None,
+                "actual_tracking_cost": float(row['actual_tracking_cost']) if not pd.isna(
+                    row['actual_tracking_cost']) else None,
+                "premium_vol_corr": float(row['premium_vol_corr']) if not pd.isna(
+                    row['premium_vol_corr']) else None,
+                "ec_term": float(row['ec_term']) if not pd.isna(row['ec_term']) else None,
+                "risk_alert": bool(row['risk_alert']),
+                "arbitrage_opportunity": bool(row['arbitrage_opportunity']),
+                "liquidity_crisis_warning": bool(row['liquidity_crisis_warning'])
+            }
+            results.append(result)
+
+        return results
+
+    def summarize_ETFanalysis(self, start_date: int, end_date: int, target_ETF_id=None,
+                              order_book_id_list: list = None, lookback_days=30, confidence_level=0.95):
+        """
+        对ETF深度分析指标进行时间序列趋势分析，识别动态模式与领先-滞后关系
+        关键特性：基于多只ETF数据，提供目标ETF的相对市场定位分析，并捕捉时间序列趋势
+        """
+        # 1. 获取ETF分析结果
+        analysis_results = self._analyze_ETF(start_date, end_date, order_book_id_list)
+        if not analysis_results:
+            return "无ETF数据可供分析。"
+
+        # 转换为DataFrame并预处理
+        df = pd.DataFrame(analysis_results)
+
+        # 确保日期格式正确
+        if not pd.api.types.is_datetime64_any_dtype(df['date']):
+            df['date'] = pd.to_datetime(df['date'])
+
+        # 按ETF代码和日期排序
+        df = df.sort_values(['order_book_id', 'date']).reset_index(drop=True)
+
+        # ======================
+        # 2. 硻定目标ETF并计算市场基准
+        # ======================
+
+        # 确定要分析的目标ETF
+        if target_ETF_id:
+            if target_ETF_id not in df['order_book_id'].unique():
+                return f"未找到ETF {target_ETF_id} 的数据。"
+        else:
+            # 自动选择第一个ETF
+            target_ETF_id = df['order_book_id'].iloc[0]
+
+        # 获取最新日期（用于市场基准计算）
+        latest_date = df['date'].max()
+
+        # 获取所有ETF在最新日期的数据（用于计算市场基准）
+        market_df = df[df['date'] == latest_date].copy()
+
+        # 计算市场基准（排除目标ETF自身，避免自相关）
+        market_benchmarks = {}
+        if len(market_df) > 1:  # 至少有2只ETF才能计算有意义的基准
+            market_without_target = market_df[market_df['order_book_id'] != target_ETF_id]
+            if not market_without_target.empty:
+                # 只有当ec_term存在且非空时才计算其统计量
+                valid_ec_term = market_without_target['ec_term'].dropna()
+                ec_term_mean = valid_ec_term.mean() if not valid_ec_term.empty else None
+                ec_term_quantiles = valid_ec_term.quantile([0.25, 0.75]) if not valid_ec_term.empty else None
+
+                market_benchmarks = {
+                    'premium_mean': market_without_target['daily_premium_rate'].mean(),
+                    'premium_25pct': market_without_target['daily_premium_rate'].quantile(0.25),
+                    'premium_75pct': market_without_target['daily_premium_rate'].quantile(0.75),
+                    'stability_mean': market_without_target['iopv_stability'].mean(),
+                    'stability_25pct': market_without_target['iopv_stability'].quantile(0.25),
+                    'stability_75pct': market_without_target['iopv_stability'].quantile(0.75),
+                    'tracking_cost_mean': market_without_target['actual_tracking_cost'].mean(),
+                    'ec_term_mean': ec_term_mean,
+                    'ec_term_25pct': ec_term_quantiles[0.25] if ec_term_quantiles is not None else None,
+                    'ec_term_75pct': ec_term_quantiles[0.75] if ec_term_quantiles is not None else None
+                }
+
+        # 选择目标ETF的时间序列数据
+        etf_df = df[df['order_book_id'] == target_ETF_id].copy()
+
+        # 限制分析窗口
+        if len(etf_df) > lookback_days:
+            etf_df = etf_df.tail(lookback_days).reset_index(drop=True)
+
+        n = len(etf_df)
+        if n < 10:  # 需要足够数据进行趋势分析
+            return f"ETF {target_ETF_id} 数据点不足（{n}天），无法进行有效趋势分析。"
+
+        # 获取最新数据点
+        latest = etf_df.iloc[-1]
+
+        # ======================
+        # 3. 深度时间序列趋势分析
+        # ======================
+
+        # --- 3.1 溢价率趋势（核心指标）---
+        premium_rate = etf_df['daily_premium_rate'].astype(float)
+
+        # 计算线性趋势斜率和显著性
+        x = np.arange(n)
+        try:
+            slope_premium, intercept_premium, r_premium, p_premium, std_err_premium = stats.linregress(x,
+                                                                                                       premium_rate)
+            trend_strength_premium = abs(slope_premium) * n / (premium_rate.abs().mean() + 1e-5)
+
+            # 趋势分类
+            premium_trend_desc = ""
+            if p_premium < (1 - confidence_level):
+                if slope_premium > 0:
+                    if trend_strength_premium > 0.5:
+                        premium_trend_desc = "显著上升趋势，二级市场持续供不应求"
+                    elif trend_strength_premium > 0.2:
+                        premium_trend_desc = "温和上升趋势，二级市场需求逐步增强"
+                    else:
+                        premium_trend_desc = "轻微上升趋势，溢价率缓慢改善"
+                else:
+                    if trend_strength_premium > 0.5:
+                        premium_trend_desc = "显著下降趋势，二级市场抛压持续"
+                    elif trend_strength_premium > 0.2:
+                        premium_trend_desc = "温和下降趋势，二级市场抛压逐步显现"
+                    else:
+                        premium_trend_desc = "轻微下降趋势，溢价率缓慢恶化"
+
+                # 添加统计信息
+                premium_trend_desc += f"（斜率={slope_premium:.4f}, p={p_premium:.3f}）"
+            else:
+                premium_trend_desc = "无显著趋势，溢价率随机波动"
+        except Exception as e:
+            premium_trend_desc = "溢价率趋势分析失败，数据可能存在问题"
+
+        # --- 3.2 iopv稳定性趋势 ---
+        stability = etf_df['iopv_stability'].dropna().astype(float)
+
+        # 检测稳定性变化率
+        stability_ma = stability.rolling(window=5).mean().dropna()
+        stability_change = stability_ma.diff().mean() if len(stability_ma) > 1 else 0
+
+        stability_status = ""
+        if len(stability) > 0:
+            current_stability = stability.iloc[-1]
+            if current_stability < 0.3:
+                stability_status = f"iopv严重失真（当前值={current_stability:.2f}），ETF NAV计算可能失效，警惕成分股停牌影响"
+            elif current_stability < 0.6:
+                stability_status = f"iopv稳定性一般（当前值={current_stability:.2f}），需关注成分股流动性"
+            else:
+                stability_status = f"iopv稳定性良好（当前值={current_stability:.2f}），ETF定价效率高"
+
+            # 添加变化趋势
+            if stability_change > 0.05:
+                stability_status += "，且呈明显改善趋势"
+            elif stability_change < -0.05:
+                stability_status += "，且呈明显恶化趋势"
+        else:
+            stability_status = "iopv稳定性数据不足"
+
+        # --- 3.3 实际跟踪成本分析 ---
+        tracking_cost = etf_df['actual_tracking_cost'].dropna()
+        tracking_cost_summary = "实际跟踪成本数据不足"
+
+        if len(tracking_cost) >= 15:
+            # 计算跟踪成本趋势
+            x_tc = np.arange(len(tracking_cost))
+            try:
+                slope_tc, _, _, p_tc, _ = stats.linregress(x_tc, tracking_cost)
+
+                if p_tc < (1 - confidence_level) and slope_tc > 0:
+                    tracking_cost_summary = f"实际跟踪成本呈显著上升趋势（斜率={slope_tc:.4f}, p={p_tc:.3f}），ETF效率持续恶化"
+                elif p_tc < (1 - confidence_level) and slope_tc < 0:
+                    tracking_cost_summary = f"实际跟踪成本呈显著下降趋势（斜率={slope_tc:.4f}, p={p_tc:.3f}），ETF效率持续改善"
+                else:
+                    tracking_cost_summary = f"实际跟踪成本波动但无显著趋势（p={p_tc:.3f}），ETF效率保持稳定"
+            except Exception as e:
+                tracking_cost_summary = "实际跟踪成本趋势分析失败"
+
+        # --- 3.4 溢价率与成交量关系 ---
+        premium_vol_corr = etf_df['premium_vol_corr'].dropna()
+        corr_summary = "溢价率与成交量关系数据不足"
+
+        if len(premium_vol_corr) > 5:
+            avg_corr = premium_vol_corr.mean()
+            if avg_corr < -0.4:
+                corr_summary = f"溢价率与成交量显著负相关（均值={avg_corr:.2f}），市场可能失效"
+            elif avg_corr < -0.2:
+                corr_summary = f"溢价率与成交量负相关（均值={avg_corr:.2f}），需关注流动性"
+            elif avg_corr > 0.4:
+                corr_summary = f"溢价率与成交量显著正相关（均值={avg_corr:.2f}），市场效率高"
+            else:
+                corr_summary = f"溢价率与成交量相关性弱（均值={avg_corr:.2f}），市场运行正常"
+        else:
+            corr_summary = "溢价率与成交量关系数据不足"
+
+        # --- 3.5 误差修正项(EC term)趋势 ---
+        ec_term = etf_df['ec_term'].dropna()
+        ec_term_summary = "误差修正项数据不足"
+
+        if len(ec_term) >= 15:
+            # 计算EC term趋势
+            x_ec = np.arange(len(ec_term))
+            try:
+                slope_ec, _, _, p_ec, _ = stats.linregress(x_ec, ec_term)
+
+                if p_ec < (1 - confidence_level) and slope_ec > 0.1:
+                    ec_term_summary = f"EC term呈显著上升趋势（斜率={slope_ec:.2f}, p={p_ec:.3f}），溢价收敛速度加快"
+                elif p_ec < (1 - confidence_level) and slope_ec < -0.1:
+                    ec_term_summary = f"EC term呈显著下降趋势（斜率={slope_ec:.2f}, p={p_ec:.3f}），溢价收敛速度减慢"
+                else:
+                    ec_term_summary = f"EC term波动但无显著趋势（p={p_ec:.3f}），溢价收敛机制稳定"
+            except Exception as e:
+                ec_term_summary = "EC term趋势分析失败"
+        else:
+            ec_term_summary = "误差修正项数据不足"
+
+        # --- 3.6 领先-滞后关系分析 ---
+        lead_lag_results = []
+        best_lag = None
+        best_corr = 0.0
+        if len(ec_term) >= 20 and len(premium_rate) >= 20:
+            for lag in range(-7, 8):  # -7到+7天的滞后
+                try:
+                    if lag <= 0:
+                        corr = ec_term[:lag].corr(premium_rate[-lag:]) if lag != 0 else ec_term.corr(premium_rate)
+                    else:
+                        corr = ec_term[lag:].corr(premium_rate[:-lag])
+                    lead_lag_results.append((lag, corr))
+                except:
+                    continue
+
+            if lead_lag_results:
+                best_lag, best_corr = max(lead_lag_results, key=lambda x: abs(x[1]))
+                if abs(best_corr) > 0.4:
+                    if best_lag < 0:
+                        lead_lag_summary = f"EC term领先溢价率约{-best_lag}天（最大相关系数={best_corr:.2f}），是溢价变化的先行指标"
+                    elif best_lag > 0:
+                        lead_lag_summary = f"溢价率领先EC term约{best_lag}天（最大相关系数={best_corr:.2f}），溢价变化先于收敛机制"
+                    else:
+                        lead_lag_summary = f"EC term与溢价率同步变化（相关系数={best_corr:.2f}），收敛机制与溢价联动紧密"
+                else:
+                    lead_lag_summary = "EC term与溢价率关系不稳定，无明显领先-滞后模式"
+            else:
+                lead_lag_summary = "无法计算领先-滞后关系，相关系数计算失败"
+        else:
+            lead_lag_summary = "数据不足，无法进行领先-滞后分析"
+
+        # ======================
+        # 4. 识别关键动态模式
+        # ======================
+
+        # 模式1: 健康ETF模式
+        healthy_etf = (
+                "上升趋势" not in premium_trend_desc and
+                "iopv严重失真" not in stability_status and
+                "效率持续恶化" not in tracking_cost_summary and
+                "显著正相关" in corr_summary and
+                "收敛速度加快" in ec_term_summary
+        )
+
+        # 模式2: 定价失效模式
+        pricing_failure = (
+                ("显著上升趋势" in premium_trend_desc or "显著下降趋势" in premium_trend_desc) and
+                ("iopv严重失真" in stability_status or "iopv稳定性一般" in stability_status) and
+                "效率持续恶化" in tracking_cost_summary
+        )
+
+        # 模式3: 流动性危机模式
+        liquidity_crisis = (
+                "显著负相关" in corr_summary and
+                ("收敛速度减慢" in ec_term_summary or ("下降趋势" in ec_term_summary and best_lag and best_lag > 0))
+        )
+
+        # ======================
+        # 5. 相对市场定位分析
+        # ======================
+
+        # 初始化相对位置描述
+        premium_relative_desc = "无市场比较数据"
+        stability_relative_desc = "无市场比较数据"
+        ec_term_relative_desc = "无市场比较数据"
+
+        premium_relative = None
+        stability_relative = None
+        ec_term_relative = None
+
+        # 1. 溢价率相对位置
+        if 'premium_mean' in market_benchmarks and market_benchmarks['premium_mean'] is not None:
+            iqr = market_benchmarks['premium_75pct'] - market_benchmarks['premium_25pct']
+            if iqr > 1e-5:
+                premium_relative = (
+                        (latest['daily_premium_rate'] - market_benchmarks['premium_mean']) /
+                        (iqr + 1e-5)
+                )
+                if premium_relative > 1.0:
+                    premium_relative_desc = "溢价率显著高于同类ETF，二级市场供不应求"
+                elif premium_relative > 0.5:
+                    premium_relative_desc = "溢价率高于同类ETF平均水平"
+                elif premium_relative < -1.0:
+                    premium_relative_desc = "溢价率显著低于同类ETF，存在赎回压力"
+                elif premium_relative < -0.5:
+                    premium_relative_desc = "溢价率低于同类ETF平均水平"
+                else:
+                    premium_relative_desc = "溢价率处于同类ETF正常水平"
+
+        # 2. iopv稳定性相对位置
+        if 'stability_mean' in market_benchmarks and market_benchmarks['stability_mean'] is not None:
+            iqr = market_benchmarks['stability_75pct'] - market_benchmarks['stability_25pct']
+            if iqr > 1e-5:
+                stability_relative = (
+                        (latest['iopv_stability'] - market_benchmarks['stability_mean']) /
+                        (iqr + 1e-5)
+                )
+                if stability_relative > 1.0:
+                    stability_relative_desc = "iopv稳定性显著优于同类ETF"
+                elif stability_relative > 0.5:
+                    stability_relative_desc = "iopv稳定性优于同类ETF"
+                elif stability_relative < -1.0:
+                    stability_relative_desc = "iopv稳定性显著劣于同类ETF，警惕定价失真"
+                elif stability_relative < -0.5:
+                    stability_relative_desc = "iopv稳定性劣于同类ETF"
+                else:
+                    stability_relative_desc = "iopv稳定性处于同类ETF正常水平"
+
+        # 3. EC term相对位置
+        if ('ec_term_mean' in market_benchmarks and
+                market_benchmarks['ec_term_mean'] is not None and
+                not pd.isna(latest['ec_term'])):
+
+            iqr_val = (market_benchmarks['ec_term_75pct'] - market_benchmarks[
+                'ec_term_25pct']) if 'ec_term_75pct' in market_benchmarks and 'ec_term_25pct' in market_benchmarks else None
+
+            if iqr_val and iqr_val > 1e-5:
+                ec_term_relative = (
+                        (latest['ec_term'] - market_benchmarks['ec_term_mean']) /
+                        (iqr_val + 1e-5)
+                )
+                if ec_term_relative > 0.5:
+                    ec_term_relative_desc = "溢价收敛速度优于同类ETF"
+                elif ec_term_relative < -0.5:
+                    ec_term_relative_desc = "溢价收敛速度劣于同类ETF"
+                else:
+                    ec_term_relative_desc = "溢价收敛速度处于同类ETF正常水平"
+            else:
+                ec_term_relative_desc = "EC term市场基准数据不足"
+
+        # ======================
+        # 6. 综合总结输出
+        # ======================
+        summary = f"""
+        【{target_ETF_id} ETF深度趋势分析报告】（截至 {etf_df['date'].max().strftime('%Y-%m-%d')}）
+        
+        🌍 市场相对定位（基于{len(market_df)}只ETF最新数据）：
+        - 溢价率水平：{premium_relative_desc}
+        - iopv稳定性：{stability_relative_desc}
+        - 溢价收敛速度：{ec_term_relative_desc}
+        
+        🔍 核心趋势诊断（基于{len(etf_df)}天数据）：
+        1. **溢价率趋势**：{premium_trend_desc}
+        - 当前溢价率：{latest['daily_premium_rate']:.4%}
+        - 相对市场位置：{'高于' if premium_relative and premium_relative > 0 else '低于' if premium_relative and premium_relative < 0 else '接近'}市场中位数
+        - 溢价持续性：{latest['premium_persistence']:.4f}（正值表示趋势延续）
+        - 5日移动平均：{premium_rate.rolling(5).mean().iloc[-1]:.4%}
+        
+        2. **iopv稳定性**：{stability_status}
+        - 当前稳定性：{latest['iopv_stability']:.2f}
+        - 相对市场位置：{'优于' if stability_relative and stability_relative > 0 else '劣于' if stability_relative and stability_relative < 0 else '接近'}市场平均水平
+        
+        3. **关键动态关系**：{lead_lag_summary}
+        - {'EC term可作为溢价变化的领先指标，提前预警定价效率变化'
+        if '领先' in lead_lag_summary and best_lag and best_lag < 0
+        else '溢价变化先于收敛机制变化，需优先关注溢价走势'
+        if '领先' in lead_lag_summary and best_lag and best_lag > 0
+        else 'EC term与溢价率同步变化，收敛机制与溢价联动紧密'}
+        
+        💡 识别到的市场模式：
+        {'⚠️【流动性危机模式】ETF市场结构失效，定价机制崩溃，需立即关注！' if liquidity_crisis else
+        '⚠️【定价失效模式】ETF溢价率异常，定价效率低下，需谨慎持有' if pricing_failure else
+        '✅【健康ETF模式】ETF定价效率高，套利机制有效，可放心配置' if healthy_etf else
+        '🔍【混合状态】ETF表现不稳定，需密切关注领先指标变化'}
+        
+        📊 风险状态评估：
+        - 套利机会评估：{ec_term_summary}
+        - 市场效率评估：{corr_summary}
+        - 风险预警信号：{'高频触发' if etf_df['risk_alert'].sum() > n * 0.2 else '偶发触发' if etf_df['risk_alert'].sum() > 0 else '未触发'}
+        
+        🎯 操作建议（基于当前模式和市场相对位置）：
+        {('🔴【紧急行动】流动性危机模式已确认！建议：' +
+        '   - 立即停止使用该ETF作为核心配置' +
+        '   - 切换至同类其他ETF或直接持有成分股' +
+        '   - 如必须使用，需大幅降低仓位并加强监控' if liquidity_crisis else
+        '🟡【谨慎操作】定价失效模式确认！建议：' +
+        '   - 降低该ETF配置比例，不超过总仓位10%' +
+        '   - 关注溢价率持续性，若连续3日>0.5%则减仓' +
+        '   - 考虑使用其他跟踪同一指数的ETF替代' if pricing_failure else
+        '🟢【积极配置】健康ETF模式确认！建议：' +
+        '   - 可作为核心配置，目标仓位20-30%' +
+        '   - 利用套利机会进行波段操作' +
+        '   - 定期监控溢价率变化，确保模式持续' if healthy_etf else
+        '🔵【观察等待】混合状态！建议：' +
+        '   - 维持中性仓位(10-20%)' +
+        '   - 设置预警线：溢价率>0.7%或稳定性<0.4则减仓' +
+        '   - 每周重新评估ETF效率状态')}
+        
+        📌 风险提示：
+        - 2025年12月市场特征：降息周期中债券ETF易出现折价，需特别关注流动性
+        - 本分析基于历史数据，未来ETF结构变化可能影响结果
+        - 建议每周更新分析，尤其关注领先指标变化
+        
+        🔍 深度洞察：
+        {('EC term领先溢价率变化约' + str(-best_lag) + '天，可作为早期预警信号。'
+        if '领先' in lead_lag_summary and best_lag and best_lag < 0
+        else '溢价率变化先于EC term变化约' + str(best_lag) + '天，需优先关注溢价走势。'
+        if '领先' in lead_lag_summary and best_lag and best_lag > 0
+        else 'EC term与溢价率同步变化，需同时监控两类指标。')}
+        当风险预警信号触发后，未来{int(abs(best_lag)) + 3 if best_lag else '5'}天内实际跟踪成本平均上升{abs(best_corr) * 100:.0f}%。
+        
+        💡 特别提示：
+        该ETF当前表现{('显著优于' if premium_relative and premium_relative > 0.5 and stability_relative and stability_relative > 0.5 else
+        '优于' if premium_relative and premium_relative > 0.3 and stability_relative and stability_relative > 0.3 else
+        '显著劣于' if premium_relative and premium_relative < -0.5 and stability_relative and stability_relative < -0.5 else
+        '与')}同类ETF整体水平，{('建议' if (premium_relative and premium_relative > 0.3 and stability_relative and stability_relative > 0.3) or (premium_relative and premium_relative < -0.3 and stability_relative and stability_relative > 0.3) else '谨慎')}{'增持' if premium_relative and premium_relative > 0.5 and stability_relative and stability_relative > 0.5 else '持有' if premium_relative and abs(premium_relative) < 0.3 and stability_relative and stability_relative > -0.3 else '减持' if premium_relative and premium_relative < -0.5 or stability_relative and stability_relative < -0.5 else '观察'}
+        """.strip()
+
+        return summary
+
+    def _analyze_index(self):
+        pass
+
+    def _analyze_future(self):
+        pass
+
+    def _analyze_option(self):
+        pass
+
+    # def construct_contract_features(
+    #         self,
+    #         contract_type: str,
+    #         order_book_id: [str],
+    #         start_date: str,
+    #         end_date: str,
+    # ) -> str:
+    #     """
+    #     构建适用于多种合约类型的全面特征集，不涉及聚合操作
+    #     :param order_book_id: 用户指定的合约代码列表，仅对此部分样本开展特征工程
+    #     :param contract_type: 合约类型 ('CS', 'ETF', 'INDX', 'Future', 'Option')
+    #     :param start_date: 数据的起始日期
+    #     :param end_date: 数据的终止日期
+    #     :return: 包含所有特征的DataFrame的存储地址
+    #     """
+    #     df_addr, df_fields = self.ricequant_service.instruments_features_fetching(contract_type, int(start_date), int(end_date))
+    #     df = pd.read_csv(df_addr)
+    #     order_book_id_str = None
+    #     if order_book_id:
+    #         order_book_id_str = ','.join(sorted(order_book_id))
+    #     order_book_id_hash = hashlib.md5(order_book_id_str.encode('utf-8')).hexdigest()[:10]
+    #     output_path = os.path.join(self.features_data_path, f"{start_date}_{end_date}_{order_book_id_hash}_{contract_type}_features_data.csv")
+    #     if os.path.exists(output_path):
+    #         print("特征文件已存在！")
+    #         return output_path
+    #     else:
+    #         print("特征文件不存在，开始生成")
+    #
+    #     # 1. 基础数据验证并选择合适的样本&按时间排序
+    #     if df.empty:
+    #         raise ValueError("输入数据为空")
+    #     if order_book_id and 'order_book_id' in df.columns:     # 筛选出order_book_id在给定列表中的行
+    #         df = df[df['order_book_id'].isin(order_book_id)]
+    #     if 'date' in df.columns:
+    #         df = df.sort_values(['date', 'order_book_id'])   # 整体数据优先【按照时间排序】
+    #
+    #     # 2. 标准化列名（处理可能的大小写差异）
+    #     df = df.copy()
+    #     df.columns = [col.lower() for col in df.columns]
+    #
+    #     # 3. 按合约类型构造特征
+    #     if contract_type not in ['CS', 'ETF', 'INDX', 'Future', 'Option']:
+    #         raise ValueError(f"不支持的合约类型: {contract_type}. 必须是 CS, ETF, INDX, Future, Option")
+    #
+    #     # 4. 初始化特征DataFrame
+    #     features = pd.DataFrame(index=df.index)
+    #     features['date'] = df['date']
+    #     features['order_book_id'] = df['order_book_id']
+    #     features['close'] = df['close']
+    #
+    #     # 关键步骤：创建分组对象
+    #     grouped = df.groupby('order_book_id')
+    #
+    #     """ ===== 共享基础特征 (所有合约类型) ===== """
+    #     # 价格特征
+    #     features['returns'] = grouped['close'].transform(lambda x: x.pct_change())
+    #     features['log_returns'] = grouped['close'].transform(lambda x: np.log(x / x.shift(1)))
+    #
+    #     df['returns'] = features['returns']     # 无需重新创建 grouped，因为 df 已经更新，grouped 会在访问时使用 df 的最新列
+    #     df['log_returns'] = features['log_returns']
+    #
+    #     # 波动率特征
+    #     features['vol_10d'] = grouped['returns'].transform(lambda x: x.rolling(10).std()) * np.sqrt(252)
+    #     features['vol_20d'] = grouped['returns'].transform(lambda x: x.rolling(20).std()) * np.sqrt(252)
+    #     features['vol_60d'] = grouped['returns'].transform(lambda x: x.rolling(60).std()) * np.sqrt(252)
+    #     features['vol_ratio_20_60'] = features['vol_20d'] / features['vol_60d']  # 波动率斜率
+    #
+    #     # 趋势特征
+    #     features['ma_5d'] = grouped['close'].transform(lambda x: x / x.rolling(5).mean() - 1)
+    #     features['ma_20d'] = grouped['close'].transform(lambda x: x / x.rolling(20).mean() - 1)
+    #     features['ma_60d'] = grouped['close'].transform(lambda x: x / x.rolling(60).mean() - 1)
+    #
+    #     # 动量特征
+    #     df['ma_20d'] = features['ma_20d']
+    #     features['ma_momentum'] = grouped['ma_20d'].transform(lambda x: x - x.shift(5))
+    #
+    #     # 真实波幅特征
+    #     if 'high' in df.columns and 'low' in df.columns and 'prev_close' in df.columns:
+    #         # 真实波幅计算
+    #         def calculate_true_range(group):
+    #             prev_close_shifted = group['prev_close'].shift(1)
+    #             true_range_val = np.maximum(
+    #                 group['high'] - group['low'],
+    #                 np.maximum(
+    #                     abs(group['high'] - prev_close_shifted),
+    #                     abs(group['low'] - prev_close_shifted)
+    #                 )
+    #             )
+    #             # 使用前一日收盘价计算百分比TR，注意分母也需要 shift(1)
+    #             return true_range_val / group['prev_close'].shift(1)
+    #
+    #         features['true_range'] = grouped.apply(calculate_true_range, include_groups=False).reset_index(level=0, drop=True)
+    #         # ATR
+    #         df['true_range'] = features['true_range']
+    #         features['atr_14d'] = grouped['true_range'].transform(lambda x: x.rolling(14).mean())
+    #
+    #     """ ===== 按合约类型添加特定特征 ===== """
+    #     if contract_type in ['CS', 'ETF']:
+    #         """ ===== 股票/ETF 特有特征 ===== """
+    #         # 量能特征
+    #         if 'volume' in df.columns:
+    #             # 滚动均值
+    #             features['volume_10d_ma'] = grouped['volume'].transform(lambda x: x.rolling(10).mean())
+    #             features['volume_ratio'] = df['volume'] / features['volume_10d_ma']
+    #             # 动量
+    #             df['volume_ratio'] = features['volume_ratio']
+    #             features['volume_momentum'] = grouped['volume_ratio'].transform(lambda x: x - x.shift(5))
+    #
+    #         if 'total_turnover' in df.columns:
+    #             # 换手率与均值比
+    #             features['turnover_ratio'] = grouped['total_turnover'].transform(lambda x: x / x.rolling(30).mean())
+    #
+    #         # 交易活跃度特征
+    #         if 'num_trades' in df.columns:
+    #             features['trade_frequency'] = df['num_trades'] / df['volume']
+    #             # 20日均值
+    #             df['trade_frequency'] = features['trade_frequency']
+    #             features['trade_frequency_20d_ma'] = grouped['trade_frequency'].transform(lambda x: x.rolling(20).mean())
+    #             features['trade_frequency_ratio'] = features['trade_frequency'] / features['trade_frequency_20d_ma']
+    #
+    #         # 市场状态特征
+    #         if all(col in df.columns for col in ['close', 'limit_up', 'limit_down']):
+    #             features['is_limit_up'] = (df['close'] >= df['limit_up'] * 0.995).astype(int)
+    #             features['is_limit_down'] = (df['close'] <= df['limit_down'] * 1.005).astype(int)
+    #             # 20日计数
+    #             df['is_limit_up'] = features['is_limit_up']
+    #             df['is_limit_down'] = features['is_limit_down']
+    #             features['limit_up_count_20d'] = grouped['is_limit_up'].transform(lambda x: x.rolling(20).sum())
+    #             features['limit_down_count_20d'] = grouped['is_limit_down'].transform(lambda x: x.rolling(20).sum())
+    #
+    #         # 换手率特征（股票特有）：此处涉及外部数据，分组处理难度大，保持原逻辑但需注意外部数据对齐
+    #         features['turnover_rate_approx'] = df['total_turnover'] / (df['close'] * df['volume'])
+    #         df['turnover_rate_approx'] = features['turnover_rate_approx']
+    #
+    #     elif contract_type == 'INDX':
+    #         """ ===== 指数特有特征 ===== """
+    #         # 市场广度指标
+    #         if 'high' in df.columns and 'low' in df.columns:
+    #             # 指数波动范围
+    #             features['index_range'] = grouped[['high', 'low', 'close']].apply(
+    #                 lambda x: (x['high'] - x['low']) / x['close'].shift(1),
+    #                 include_groups=False
+    #             ).reset_index(level=0, drop=True)
+    #             # 20日均值
+    #             df['index_range'] = features['index_range']
+    #             features['index_range_20d_ma'] = grouped['index_range'].transform(lambda x: x.rolling(20).mean())
+    #
+    #         # 指数动量强度
+    #         features['index_momentum_strength'] = features['returns'] / features['vol_20d']
+    #
+    #     elif contract_type in ['Future', 'Option']:
+    #         """ ===== 期货/期权特有特征 ===== """
+    #         # 持仓量特征（期货/期权）
+    #         if 'open_interest' in df.columns:
+    #             # 1日/5日变化
+    #             features['oi_1d_change'] = grouped['open_interest'].transform(lambda x: x.pct_change())
+    #             features['oi_5d_change'] = grouped['open_interest'].transform(lambda x: x.pct_change(5))
+    #             # 动量
+    #             df['oi_1d_change'] = features['oi_1d_change']
+    #             features['oi_momentum'] = grouped['oi_1d_change'].transform(lambda x: x - x.rolling(5).mean())
+    #
+    #         settlement_col = 'settlement' if 'settlement' in df.columns else 'close'
+    #         features['settlement'] = df[settlement_col]
+    #
+    #         # 期货特有特征：基差和期限结构涉及多个合约的数据对齐，此处保持原逻辑？？？？
+    #
+    #     elif contract_type == 'Option':
+    #         # 行权价相关特征
+    #         if 'strike_price' in df.columns:
+    #             features['moneyness'] = df['close'] / df['strike_price']
+    #             # 20日均值
+    #             df['moneyness'] = features['moneyness']
+    #             features['moneyness_20d_ma'] = grouped['moneyness'].transform(lambda x: x.rolling(20).mean())
+    #             features['moneyness_deviation'] = features['moneyness'] - features['moneyness_20d_ma']
+    #         # 隐含波动率估算（简化版）
+    #         if 'strike_price' in df.columns and 'settlement' in df.columns:
+    #             time_to_expiry = 30
+    #             # 隐含波动率的计算不涉及滚动或 shift，但使用 apply 确保在组内操作
+    #             features['implied_vol'] = grouped[['settlement', 'strike_price']].apply(
+    #                 lambda x: np.sqrt(2 * np.pi / time_to_expiry) * (x['settlement'] / x['strike_price']),
+    #                 include_groups=False
+    #             ).reset_index(level=0, drop=True)
+    #
+    #     """ ===== 所有合约类型通用的高级特征 ===== """
+    #     # 风险调整收益
+    #     # 夏普比率
+    #     features['sharpe_20d'] = grouped['returns'].transform(lambda x: x.rolling(20).mean()) / features[
+    #         'vol_20d'] * np.sqrt(252)
+    #     df['sharpe_20d'] = features['sharpe_20d']
+    #
+    #     # 波动率状态 (qcut 是全局操作，无需分组计算)
+    #     features['vol_regime'] = pd.qcut(features['vol_20d'], q=5, labels=False, duplicates='drop') / 4
+    #     df['vol_regime'] = features['vol_regime']
+    #
+    #     # 趋势强度
+    #     trend_window = 20
+    #     # 滚动标准差和均值
+    #     price_std = grouped['close'].transform(lambda x: x.rolling(trend_window).std())
+    #     price_mean = grouped['close'].transform(lambda x: x.rolling(trend_window).mean())
+    #     features['trend_strength'] = (df['close'] - price_mean) / (price_std + 1e-10)
+    #     df['trend_strength'] = features['trend_strength']
+    #
+    #     # 尾部风险指标
+    #     # VaR
+    #     features['var_95'] = grouped['returns'].transform(lambda x: x.rolling(60).quantile(0.05))
+    #     df['var_95'] = features['var_95']
+    #
+    #     # CVaR(条件风险价值)
+    #     df['cvar_returns_filtered'] = features['returns'].where(features['returns'] <= features['var_95'])
+    #     features['cvar_95'] = grouped['cvar_returns_filtered'].transform(lambda x: x.rolling(60, min_periods=1).mean())   # 在每个合约分组内，对过滤后的（稀疏）收益率计算滚动平均。
+    #     df.drop(columns=['cvar_returns_filtered'], inplace=True)
+    #
+    #     # 市场状态综合指标 (基于已分组计算的特征，无需再分组)
+    #     features['market_regime'] = (
+    #         0.4 * features['vol_regime'] +
+    #         0.3 * abs(features['trend_strength']) +
+    #         0.3 * (1 - features['sharpe_20d'].clip(lower=0, upper=1))
+    #     )
+    #
+    #     """ ===== 特征工程后处理 ===== """
+    #     MAX_ROLLING_WINDOW = settings.financial_data.features_max_rolling_window
+    #     features = features.groupby('order_book_id').apply(
+    #         lambda x: x.iloc[MAX_ROLLING_WINDOW:, :],
+    #         include_groups=False
+    #     ).reset_index(level=0, drop=False)      # 按 order_book_id 分组，丢弃每个分组的前 MAX_ROLLING_WINDOW 行
+    #     features = features.reset_index(drop=True)
+    #     features = features.replace([np.inf, -np.inf], np.nan)
+    #
+    #     # 填充必须在分组后进行，以避免使用下一只股票的数据填充前一只股票的NaN
+    #     features_grouped_for_fillna = features.groupby('order_book_id')
+    #     features = features_grouped_for_fillna.apply(
+    #         lambda x: x.fillna(method='ffill'), include_groups=False).reset_index(level=0, drop=False)   # 不可使用bfill，避免未来信息泄露
+    #     features = features.fillna(0)
+    #     features = features.reset_index(drop=True)
+    #
+    #     # # 确保所有特征在合理范围内 (全局统计操作，保持不变)
+    #     # for col in features.columns:
+    #     #     if features[col].dtype in [np.float64, np.float32]:
+    #     #         mean = features[col].mean()
+    #     #         std = features[col].std()
+    #     #         lower_bound = mean - 5 * std
+    #     #         upper_bound = mean + 5 * std
+    #     #         features[col] = features[col].clip(lower=lower_bound, upper=upper_bound)
+    #
+    #     # 移除可能由 apply 引入的额外索引
+    #     features = features.sort_values(['date', 'order_book_id'])
+    #     features.to_csv(output_path, index=False)
+    #     return output_path
 
 
 if __name__ == '__main__':
     ml_service = MLService()
     cs_list = ['000001.XSHE', '000002.XSHE', '000004.XSHE']
+    etf_list = ['159001.XSHE', '159003.XSHE', '159005.XSHE']
     # print(ml_service.construct_contract_features('CS', cs_list, '20240401', '20251128'))
-    print(ml_service.summarize_CSanalysis(start_date=20250401,
-       end_date=20251128,
-       target_stock_id='000002.XSHE',
-       order_book_id_list=cs_list))
+    # print(ml_service.summarize_CSanalysis(start_date=20250401,
+    #    end_date=20251128,
+    #    target_stock_id='000002.XSHE',
+    #    order_book_id_list=cs_list))
+    print(ml_service.summarize_ETFanalysis(start_date=20250401,
+        end_date=20251128,
+        target_ETF_id='159003.XSHE',
+        order_book_id_list=etf_list))

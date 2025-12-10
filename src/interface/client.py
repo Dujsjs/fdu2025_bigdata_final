@@ -3,7 +3,7 @@ from src.services.llm_service import init_llm_and_embed_models
 from src.agent.tools import get_rag_service
 import asyncio
 from src.services.intent_recognition import intent_recognition
-from src.services.params_fetching import get_param_CSanalysis
+from src.services.params_fetching import get_param_CSanalysis, get_param_ETFanalysis
 from src.services.ml_service import MLService
 
 async def main_async():
@@ -63,7 +63,12 @@ async def main_async():
                                                         order_book_id_list=cs_params['order_book_id_list']))
                         final_answer += cs_analysis+'\n'+'\n'
                     elif user_query == 'ETF':
-                        pass
+                        etf_params = get_param_ETFanalysis()
+                        etf_analysis = str(ml_service.summarize_ETFanalysis(start_date=etf_params['start_date'],
+                                                        end_date=etf_params['end_date'],
+                                                        target_ETF_id=etf_params['target_ETF_id'],
+                                                        order_book_id_list=etf_params['ETF_id_list']))
+                        final_answer += etf_analysis+'\n'+'\n'
                     elif user_query == 'INDX':
                         pass
                     elif user_query == 'Future':

@@ -3,7 +3,6 @@ from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core import Settings
 from src.agent.tools import get_all_rag_tools
 
-
 def create_invest_rag_agent():
     """
     创建并返回具备多轮信息收集和工具调用的金融 ReAct Agent。

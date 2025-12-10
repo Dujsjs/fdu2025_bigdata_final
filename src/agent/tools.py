@@ -106,8 +106,8 @@ def get_contract_analysis_tool():
     )
 
 
-# --- 3. 金融数据类工具 ---
-def get_instruments_data_tool():
+# --- 3. 金融信息查询工具 ---
+def get_instruments_info_tool():
     """将 RiceQuantService 的查询合约功能包装成 LlamaIndex 函数工具"""
     ricequant_service = get_ricequant_service()
     return FunctionTool.from_defaults(
@@ -124,4 +124,4 @@ def get_instruments_data_tool():
 
 def get_all_rag_tools():
     """返回所有可用的工具列表"""
-    return [get_rag_tool()]
+    return [get_rag_tool(), get_instruments_info_tool()]
