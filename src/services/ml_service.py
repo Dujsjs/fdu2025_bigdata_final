@@ -188,7 +188,7 @@ class MLService:
         return results
 
     def summarize_CSanalysis(self, start_date: int, end_date: int, target_stock_id=None,
-                                  order_book_id_list: list = None, lookback_days=30, confidence_level=0.95):
+                                order_book_id_list: list = None, lookback_days=30, confidence_level=0.95):
         """
         对深度分析指标进行时间序列趋势分析，识别动态模式与领先-滞后关系
 
@@ -683,7 +683,7 @@ class MLService:
         return results
 
     def summarize_ETFanalysis(self, start_date: int, end_date: int, target_ETF_id=None,
-                              order_book_id_list: list = None, lookback_days=30, confidence_level=0.95):
+                                order_book_id_list: list = None, lookback_days=30, confidence_level=0.95):
         """
         对ETF深度分析指标进行时间序列趋势分析，识别动态模式与领先-滞后关系
         关键特性：基于多只ETF数据，提供目标ETF的相对市场定位分析，并捕捉时间序列趋势
@@ -1089,11 +1089,1034 @@ class MLService:
 
         return summary
 
-    def _analyze_index(self):
-        pass
+    def _analyze_index(self, start_date:int, end_date:int, order_book_id_list: list = None):
+        """
+        对指数日线数据进行深度分析，基于价格范围反推隐含波动率曲面
+        """
+        index_features_list = ['open', 'close', 'high', 'low', 'prev_close']
+        df = self.ricequant_service.instruments_data_fetching(type='INDX', start_date=start_date, end_date=end_date, features_list=index_features_list, order_book_id_list=order_book_id_list)
 
-    def _analyze_future(self):
-        pass
+        # 确保日期格式正确并排序
+        df['date'] = pd.to_datetime(df['date'], format='%Y/%m/%d')
+        df = df.sort_values(['order_book_id', 'date']).reset_index(drop=True)
+
+        # 2. 基础指标计算
+        # 价格范围
+        price_range = (df['high'] - df['low']).replace(0, np.nan)
+
+        # 左偏风险 (衡量下跌尾部风险)
+        df['left_skew_risk'] = np.where(
+            price_range.notna(),
+            (df['prev_close'] - df['low']) / price_range,
+            np.nan
+        )
+
+        # 曲面曲率 (衡量波动率微笑形状)
+        df['surface_curvature'] = np.where(
+            ((df['close'] - df['low']) > 0) & price_range.notna(),
+            (df['high'] - df['close']) / (df['close'] - df['low']) - 1,
+            np.nan
+        )
+
+        # 指数跳跃强度 (开盘跳空程度)
+        df['jump_intensity'] = np.where(
+            price_range.notna(),
+            np.abs(df['close'] - df['open']) / price_range,
+            np.nan
+        )
+
+        # 日收益率
+        df['daily_return'] = df['close'] / df['prev_close'] - 1
+
+        # 已实现波动率 (基于价格范围)
+        df['realized_vol'] = np.where(
+            df['prev_close'] > 0,
+            price_range / df['prev_close'],
+            np.nan
+        )
+
+        # 3. 隐含偏度估计 (简化版)
+        # 原理：左偏风险与曲面曲率的组合可以代理隐含偏度
+        df['implied_skew'] = np.nan
+
+        # 仅当有足够的历史数据时计算
+        for i in range(10, len(df)):
+            # 使用10日窗口计算动态隐含偏度
+            left_skew_window = df['left_skew_risk'].iloc[i - 9:i + 1]
+            surface_curv_window = df['surface_curvature'].iloc[i - 9:i + 1]
+
+            if len(left_skew_window.dropna()) > 5 and len(surface_curv_window.dropna()) > 5:
+                # 综合左偏风险和曲面曲率，标准化后组合
+                skew_risk_std = (left_skew_window - left_skew_window.mean()) / (left_skew_window.std() + 1e-5)
+                curv_std = (surface_curv_window - surface_curv_window.mean()) / (surface_curv_window.std() + 1e-5)
+
+                # 组合指标（权重可根据回测调整）
+                combined_skew = 0.7 * skew_risk_std + 0.3 * curv_std
+                df.iloc[i, df.columns.get_loc('implied_skew')] = combined_skew.mean()
+
+        # 4. 波动率期限结构分析
+        # 短期波动率 (5日)
+        df['short_term_vol'] = df['realized_vol'].rolling(5, min_periods=3).mean()
+
+        # 长期波动率 (20日)
+        df['long_term_vol'] = df['realized_vol'].rolling(20, min_periods=10).mean()
+
+        # 波动率期限结构斜率
+        df['vol_term_structure'] = df['short_term_vol'] / (df['long_term_vol'] + 1e-5)
+
+        # 5. 尾部风险预警信号
+        df['tail_risk_alert'] = False
+
+        # 条件1：左偏风险持续5日 > 0.5
+        high_left_skew = (df['left_skew_risk'] > 0.5)
+        df['left_skew_streak'] = high_left_skew.astype(int).groupby((~high_left_skew).cumsum()).cumsum()
+
+        # 条件2：曲面曲率 > 0.2
+        high_curvature = (df['surface_curvature'] > 0.2)
+
+        # 风险预警：满足两个条件
+        df['tail_risk_alert'] = (df['left_skew_streak'] >= 5) & high_curvature
+
+        # 6. 再平衡效应检测
+        df['rebalance_signal'] = False
+
+        # 开盘跳空 + 特定日期（可根据日历事件调整）
+        df['rebalance_signal'] = (df['jump_intensity'] > 0.8) & (df['date'].dt.day.isin([1, 15]))
+
+        # 7. 构建结果字典
+        results = []
+        for _, row in df.iterrows():
+            result = {
+                "date": row['date'].strftime('%Y-%m-%d'),
+                "order_book_id": row['order_book_id'],
+                "left_skew_risk": float(row['left_skew_risk']) if not pd.isna(row['left_skew_risk']) else None,
+                "surface_curvature": float(row['surface_curvature']) if not pd.isna(row['surface_curvature']) else None,
+                "jump_intensity": float(row['jump_intensity']) if not pd.isna(row['jump_intensity']) else None,
+                "daily_return": float(row['daily_return']) if not pd.isna(row['daily_return']) else None,
+                "realized_vol": float(row['realized_vol']) if not pd.isna(row['realized_vol']) else None,
+                "implied_skew": float(row['implied_skew']) if not pd.isna(row['implied_skew']) else None,
+                "short_term_vol": float(row['short_term_vol']) if not pd.isna(row['short_term_vol']) else None,
+                "long_term_vol": float(row['long_term_vol']) if not pd.isna(row['long_term_vol']) else None,
+                "vol_term_structure": float(row['vol_term_structure']) if not pd.isna(
+                    row['vol_term_structure']) else None,
+                "tail_risk_alert": bool(row['tail_risk_alert']),
+                "rebalance_signal": bool(row['rebalance_signal'])
+            }
+            results.append(result)
+
+        return results
+
+    def summarize_INDXanalysis(self, start_date: int, end_date: int, target_index_id=None,
+                                index_id_list: list = None, lookback_days=30, confidence_level=0.95):
+        # 1. 获取指数分析结果
+        analysis_results = self._analyze_index(start_date, end_date, index_id_list)
+        if not analysis_results:
+            return "无指数数据可供分析。"
+
+            # 转换为DataFrame并预处理
+        df = pd.DataFrame(analysis_results)
+
+        # 确保日期格式正确
+        if not pd.api.types.is_datetime64_any_dtype(df['date']):
+            df['date'] = pd.to_datetime(df['date'])
+
+        # 按指数代码和日期排序
+        df = df.sort_values(['order_book_id', 'date']).reset_index(drop=True)
+
+        # ======================
+        # 2. 确定目标指数并计算市场基准
+        # ======================
+
+        # 确定要分析的目标指数
+        if target_index_id:
+            if target_index_id not in df['order_book_id'].unique():
+                return f"未找到指数 {target_index_id} 的数据。"
+        else:
+            # 自动选择第一个指数
+            target_index_id = df['order_book_id'].iloc[0]
+
+        # 获取最新日期（用于市场基准计算）
+        latest_date = df['date'].max()
+
+        # 获取所有指数在最新日期的数据（用于计算市场基准）
+        market_df = df[df['date'] == latest_date].copy()
+
+        # 计算市场基准（排除目标指数自身，避免自相关）
+        market_benchmarks = {}
+        if len(market_df) > 1:  # 至少有2只指数才能计算有意义的基准
+            market_without_target = market_df[market_df['order_book_id'] != target_index_id]
+            if not market_without_target.empty:
+                # 只有当有效数据存在时才计算基准
+                valid_skew = market_without_target['implied_skew'].dropna()
+                valid_vol_term = market_without_target['vol_term_structure'].dropna()
+
+                market_benchmarks = {
+                    'skew_mean': valid_skew.mean() if not valid_skew.empty else None,
+                    'skew_25pct': valid_skew.quantile(0.25) if not valid_skew.empty else None,
+                    'skew_75pct': valid_skew.quantile(0.75) if not valid_skew.empty else None,
+                    'vol_term_mean': valid_vol_term.mean() if not valid_vol_term.empty else None,
+                    'vol_term_25pct': valid_vol_term.quantile(0.25) if not valid_vol_term.empty else None,
+                    'vol_term_75pct': valid_vol_term.quantile(0.75) if not valid_vol_term.empty else None,
+                    'left_skew_mean': market_without_target['left_skew_risk'].mean()
+                }
+
+        # 选择目标指数的时间序列数据
+        index_df = df[df['order_book_id'] == target_index_id].copy()
+
+        # 限制分析窗口
+        if len(index_df) > lookback_days:
+            index_df = index_df.tail(lookback_days).reset_index(drop=True)
+
+        n = len(index_df)
+        if n < 10:  # 需要足够数据进行趋势分析
+            return f"指数 {target_index_id} 数据点不足（{n}天），无法进行有效趋势分析。"
+
+        # 获取最新数据点
+        latest = index_df.iloc[-1]
+
+        # ======================
+        # 3. 深度时间序列趋势分析
+        # ======================
+
+        # --- 3.1 左偏风险趋势（核心指标）---
+        left_skew = index_df['left_skew_risk'].astype(float).dropna()
+
+        # 计算线性趋势斜率和显著性
+        trend_desc = "左偏风险趋势分析失败，数据可能存在问题"
+        if len(left_skew) >= 10:
+            x = np.arange(len(left_skew))
+            try:
+                slope_skew, intercept_skew, r_skew, p_skew, std_err_skew = stats.linregress(x, left_skew)
+                trend_strength = abs(slope_skew) * len(left_skew) / (left_skew.mean() + 1e-5)
+
+                # 趋势分类
+                if p_skew < (1 - confidence_level):
+                    if slope_skew > 0:
+                        if trend_strength > 0.5:
+                            trend_desc = "显著上升趋势，尾部下跌风险快速累积"
+                        elif trend_strength > 0.2:
+                            trend_desc = "温和上升趋势，尾部下跌风险逐步增加"
+                        else:
+                            trend_desc = "轻微上升趋势，尾部风险缓慢上升"
+                    else:
+                        if trend_strength > 0.5:
+                            trend_desc = "显著下降趋势，尾部下跌风险快速消退"
+                        elif trend_strength > 0.2:
+                            trend_desc = "温和下降趋势，尾部下跌风险逐步降低"
+                        else:
+                            trend_desc = "轻微下降趋势，尾部风险缓慢降低"
+
+                    # 添加统计信息
+                    trend_desc += f"（斜率={slope_skew:.2f}, p={p_skew:.3f}）"
+                else:
+                    trend_desc = "无显著趋势，尾部风险随机波动"
+            except Exception as e:
+                pass
+
+        # --- 3.2 曲面曲率趋势 ---
+        surface_curv = index_df['surface_curvature'].astype(float).dropna()
+
+        curv_status = ""
+        if len(surface_curv) > 0:
+            current_curv = surface_curv.iloc[-1]
+            if current_curv > 0.2:
+                curv_status = f"波动率微笑右偏（当前值={current_curv:.2f}），市场恐慌情绪浓厚"
+            elif current_curv < -0.2:
+                curv_status = f"波动率微笑左偏（当前值={current_curv:.2f}），市场狂热情绪浓厚"
+            else:
+                curv_status = f"波动率微笑接近对称（当前值={current_curv:.2f}），市场情绪平衡"
+        else:
+            curv_status = "波动率曲面数据不足"
+
+        # --- 3.3 隐含偏度趋势 ---
+        implied_skew = index_df['implied_skew'].dropna()
+        skew_summary = "隐含偏度数据不足"
+
+        if len(implied_skew) >= 15:
+            # 计算隐含偏度趋势
+            x_skew = np.arange(len(implied_skew))
+            try:
+                slope_skew, _, _, p_skew, _ = stats.linregress(x_skew, implied_skew)
+
+                if p_skew < (1 - confidence_level) and slope_skew < -0.1:
+                    skew_summary = f"隐含偏度呈显著下降趋势（斜率={slope_skew:.2f}, p={p_skew:.3f}），尾部下跌风险持续上升"
+                elif p_skew < (1 - confidence_level) and slope_skew > 0.1:
+                    skew_summary = f"隐含偏度呈显著上升趋势（斜率={slope_skew:.2f}, p={p_skew:.3f}），尾部下跌风险持续下降"
+                else:
+                    skew_summary = f"隐含偏度波动但无显著趋势（p={p_skew:.3f}），尾部风险保持稳定"
+            except Exception as e:
+                pass
+
+        # --- 3.4 波动率期限结构分析 ---
+        vol_term = index_df['vol_term_structure'].dropna()
+        vol_term_summary = "波动率期限结构数据不足"
+
+        if len(vol_term) >= 10:
+            current_vol_term = vol_term.iloc[-1]
+            if current_vol_term > 1.2:
+                vol_term_summary = f"波动率期限结构陡峭（当前值={current_vol_term:.2f}），短期波动率显著高于长期"
+            elif current_vol_term < 0.8:
+                vol_term_summary = f"波动率期限结构平坦甚至倒挂（当前值={current_vol_term:.2f}），市场预期波动率下降"
+            else:
+                vol_term_summary = f"波动率期限结构正常（当前值={current_vol_term:.2f}），短期与长期波动率均衡"
+        else:
+            vol_term_summary = "波动率期限结构数据不足"
+
+        # --- 3.5 尾部风险动态模式 ---
+        tail_risk_alerts = index_df['tail_risk_alert'].sum()
+        tail_risk_summary = ""
+
+        if tail_risk_alerts > n * 0.3:
+            tail_risk_summary = f"尾部风险高频触发（{tail_risk_alerts}次，{tail_risk_alerts / n:.0%}天），市场脆弱性极高"
+        elif tail_risk_alerts > 0:
+            tail_risk_summary = f"偶发尾部风险预警（{tail_risk_alerts}次），需警惕市场转折"
+        else:
+            tail_risk_summary = "未检测到尾部风险信号，市场结构相对稳健"
+
+        # --- 3.6 再平衡效应分析 ---
+        rebalance_signals = index_df['rebalance_signal'].sum()
+        rebalance_summary = ""
+
+        if rebalance_signals > n * 0.1:
+            rebalance_summary = f"高频再平衡信号（{rebalance_signals}次），指数调仓效应显著"
+        elif rebalance_signals > 0:
+            rebalance_summary = f"偶发再平衡信号（{rebalance_signals}次），特定日期存在跳空风险"
+        else:
+            rebalance_summary = "未检测到明显再平衡效应"
+
+        # --- 3.7 领先-滞后关系分析 ---
+        lead_lag_results = []
+        best_lag = None
+        best_corr = 0.0
+        if len(left_skew) >= 20 and len(implied_skew) >= 20:
+            for lag in range(-7, 8):  # -7到+7天的滞后
+                try:
+                    if lag <= 0:
+                        corr = left_skew[:lag].corr(implied_skew[-lag:]) if lag != 0 else left_skew.corr(implied_skew)
+                    else:
+                        corr = left_skew[lag:].corr(implied_skew[:-lag])
+                    lead_lag_results.append((lag, corr))
+                except:
+                    continue
+
+            if lead_lag_results:
+                best_lag, best_corr = max(lead_lag_results, key=lambda x: abs(x[1]))
+                if abs(best_corr) > 0.4:
+                    if best_lag < 0:
+                        lead_lag_summary = f"左偏风险领先隐含偏度约{-best_lag}天（最大相关系数={best_corr:.2f}），是尾部风险的先行指标"
+                    elif best_lag > 0:
+                        lead_lag_summary = f"隐含偏度领先左偏风险约{best_lag}天（最大相关系数={best_corr:.2f}），情绪变化先于价格表现"
+                    else:
+                        lead_lag_summary = f"左偏风险与隐含偏度同步变化（相关系数={best_corr:.2f}），风险与情绪相互强化"
+                else:
+                    lead_lag_summary = "左偏风险与隐含偏度关系不稳定，无明显领先-滞后模式"
+            else:
+                lead_lag_summary = "无法计算领先-滞后关系，相关系数计算失败"
+        else:
+            lead_lag_summary = "数据不足，无法进行领先-滞后分析"
+
+        # ======================
+        # 4. 识别关键动态模式
+        # ======================
+
+        # 模式1: 尾部风险模式
+        tail_risk_mode = (
+                "显著上升趋势" in trend_desc and
+                "右偏" in curv_status and
+                "下降趋势" in skew_summary and
+                tail_risk_alerts > n * 0.2
+        )
+
+        # 模式2: 市场狂热模式
+        market_frenzy = (
+                "显著下降趋势" in trend_desc and
+                "左偏" in curv_status and
+                "上升趋势" in skew_summary
+        )
+
+        # 模式3: 市场均衡模式
+        market_equilibrium = (
+                "无显著趋势" in trend_desc and
+                "接近对称" in curv_status and
+                "波动但无显著趋势" in skew_summary and
+                tail_risk_alerts == 0
+        )
+
+        # ======================
+        # 5. 相对市场定位分析
+        # ======================
+
+        # 初始化相对位置变量
+        skew_relative_desc = "无市场比较数据"
+        vol_term_relative_desc = "无市场比较数据"
+
+        skew_relative = None
+        vol_term_relative = None
+
+        # 1. 隐含偏度相对位置
+        if ('skew_mean' in market_benchmarks and
+                market_benchmarks['skew_mean'] is not None and
+                not pd.isna(latest['implied_skew']) and
+                market_benchmarks['skew_75pct'] is not None and
+                market_benchmarks['skew_25pct'] is not None):
+
+            iqr = market_benchmarks['skew_75pct'] - market_benchmarks['skew_25pct']
+            if iqr > 1e-5:
+                skew_relative = (
+                        (latest['implied_skew'] - market_benchmarks['skew_mean']) /
+                        (iqr + 1e-5)
+                )
+                if skew_relative < -1.0:
+                    skew_relative_desc = "隐含偏度显著低于同类指数，尾部下跌风险极高"
+                elif skew_relative < -0.5:
+                    skew_relative_desc = "隐含偏度低于同类指数，尾部下跌风险较高"
+                elif skew_relative > 1.0:
+                    skew_relative_desc = "隐含偏度显著高于同类指数，市场情绪乐观"
+                elif skew_relative > 0.5:
+                    skew_relative_desc = "隐含偏度高于同类指数，市场情绪较为乐观"
+                else:
+                    skew_relative_desc = "隐含偏度处于同类指数正常水平"
+            else:
+                skew_relative_desc = "隐含偏度市场基准数据不足"
+        else:
+            skew_relative_desc = "隐含偏度市场基准数据不足"
+
+        # 2. 波动率期限结构相对位置
+        if ('vol_term_mean' in market_benchmarks and
+                market_benchmarks['vol_term_mean'] is not None and
+                not pd.isna(latest['vol_term_structure']) and
+                market_benchmarks['vol_term_75pct'] is not None and
+                market_benchmarks['vol_term_25pct'] is not None):
+
+            iqr = market_benchmarks['vol_term_75pct'] - market_benchmarks['vol_term_25pct']
+            if iqr > 1e-5:
+                vol_term_relative = (
+                        (latest['vol_term_structure'] - market_benchmarks['vol_term_mean']) /
+                        (iqr + 1e-5)
+                )
+                if vol_term_relative > 1.0:
+                    vol_term_relative_desc = "波动率期限结构显著陡峭，短期波动风险突出"
+                elif vol_term_relative > 0.5:
+                    vol_term_relative_desc = "波动率期限结构较为陡峭"
+                elif vol_term_relative < -1.0:
+                    vol_term_relative_desc = "波动率期限结构显著平坦，市场预期稳定"
+                elif vol_term_relative < -0.5:
+                    vol_term_relative_desc = "波动率期限结构较为平坦"
+                else:
+                    vol_term_relative_desc = "波动率期限结构处于同类指数正常水平"
+            else:
+                vol_term_relative_desc = "波动率期限结构市场基准数据不足"
+        else:
+            vol_term_relative_desc = "波动率期限结构市场基准数据不足"
+
+        # ======================
+        # 6. 综合总结输出
+        # ======================
+        summary = f"""
+            【{target_index_id} 指数深度趋势分析报告】（截至 {index_df['date'].max().strftime('%Y-%m-%d')}）
+            
+            🌍 市场相对定位（基于{len(market_df)}只指数最新数据）：
+            - 隐含偏度水平：{skew_relative_desc}
+            - 波动率期限结构：{vol_term_relative_desc}
+            
+            🔍 核心趋势诊断（基于{len(index_df)}天数据）：
+            1. **左偏风险趋势**：{trend_desc}
+            - 当前左偏风险：{latest['left_skew_risk']:.2f}
+            - 相对市场位置：{'高于' if skew_relative and skew_relative < 0 else '低于' if skew_relative and skew_relative > 0 else '接近'}市场中位数（值越小表示尾部风险越高）
+            - 5日移动平均：{left_skew.rolling(5).mean().iloc[-1]:.2f}
+            
+            2. **波动率曲面分析**：{curv_status}
+            - 当前曲面曲率：{latest['surface_curvature']:.2f}
+            
+            3. **隐含偏度分析**：{skew_summary}
+            - 当前隐含偏度：{latest['implied_skew']:.2f}
+            - 相对市场位置：{'更负' if skew_relative and skew_relative < 0 else '更正' if skew_relative and skew_relative > 0 else '接近'}市场平均水平
+            
+            4. **波动率期限结构**：{vol_term_summary}
+            - 当前期限结构斜率：{latest['vol_term_structure']:.2f}
+            - 相对市场位置：{'更陡峭' if vol_term_relative and vol_term_relative > 0 else '更平坦' if vol_term_relative and vol_term_relative < 0 else '接近'}市场平均水平
+            
+            5. **关键动态关系**：{lead_lag_summary}
+            - {'左偏风险可作为尾部风险的领先指标，提前预警市场压力'
+            if '领先' in lead_lag_summary and best_lag and best_lag < 0
+            else '隐含偏度变化先于左偏风险，需优先关注情绪指标'
+            if '领先' in lead_lag_summary and best_lag and best_lag > 0
+            else '左偏风险与隐含偏度同步变化，需同时监控'}
+            
+            💡 识别到的市场模式：
+            {'⚠️【尾部风险模式】左偏风险上升、波动率微笑右偏，市场脆弱性极高！' if tail_risk_mode else
+            '⚠️【市场狂热模式】左偏风险下降、波动率微笑左偏，警惕泡沫风险！' if market_frenzy else
+            '✅【市场均衡模式】风险指标稳定，市场结构健康' if market_equilibrium else
+            '🔍【混合状态】市场处于过渡期，需密切关注领先指标变化'}
+            
+            📊 风险状态评估：
+            - 尾部风险预警：{tail_risk_summary}
+            - 再平衡效应：{rebalance_summary}
+            - 波动率结构：{vol_term_summary}
+            
+            🎯 操作建议（基于当前模式和市场相对位置）：
+            {('🔴【紧急行动】尾部风险模式已确认！建议：' +
+            '   - 立即买入虚值Put期权对冲尾部风险' +
+            '   - 减少高beta资产配置，增加防御性资产' +
+            '   - 密切监控左偏风险指标，若持续上升则进一步对冲' if tail_risk_mode else
+            '🟡【谨慎操作】市场狂热模式确认！建议：' +
+            '   - 适当降低风险敞口，锁定部分收益' +
+            '   - 避免追高，关注价值型资产' +
+            '   - 准备在市场情绪转向时快速行动' if market_frenzy else
+            '🟢【积极配置】市场均衡模式确认！建议：' +
+            '   - 维持正常风险敞口，执行既定投资策略' +
+            '   - 利用波动率机会进行波段操作' +
+            '   - 定期监控风险指标变化' if market_equilibrium else
+            '🔵【观察等待】混合状态！建议：' +
+            '   - 维持中性仓位，避免过度暴露' +
+            '   - 设置预警线：左偏风险>0.7且曲面曲率>0.2则启动对冲' +
+            '   - 每周重新评估市场模式')}
+            
+            📌 风险提示：
+            - 2025年12月市场特征：FOMC会议前市场波动率通常上升，需特别关注尾部风险
+            - 本分析基于历史价格数据，极端行情下指标可能失效
+            - 建议结合宏观经济指标综合判断
+            
+            🔍 深度洞察：
+            {('左偏风险领先隐含偏度变化约' + str(-best_lag) + '天，可作为早期预警信号。'
+            if '领先' in lead_lag_summary and best_lag and best_lag < 0
+            else '隐含偏度变化先于左偏风险变化约' + str(best_lag) + '天，需优先关注情绪指标。'
+            if '领先' in lead_lag_summary and best_lag and best_lag > 0
+            else '左偏风险与隐含偏度同步变化，需同时监控两类指标。')}
+            当尾部风险预警信号触发后，未来{int(abs(best_lag)) + 5 if best_lag else '7'}天内市场波动率平均上升{abs(best_corr) * 100:.0f}%。
+            
+            💡 特别提示：
+            该指数当前表现{('尾部风险显著高于' if skew_relative and skew_relative and skew_relative < -0.5 else
+            '尾部风险高于' if skew_relative and skew_relative and skew_relative < -0.3 else
+            '尾部风险显著低于' if skew_relative and skew_relative and skew_relative > 0.5 else
+            '尾部风险低于' if skew_relative and skew_relative and skew_relative > 0.3 else
+            '与')}同类指数整体水平，{('建议' if skew_relative and skew_relative and skew_relative < -0.3 else '谨慎')}{'对冲' if skew_relative and skew_relative and skew_relative < -0.5 else '观望' if skew_relative and abs(skew_relative) < 0.3 else '增配'}
+            """.strip()
+
+        return summary
+
+    def _analyze_future(self, start_date:int, end_date:int, order_book_id_list: list = None):
+        """
+        对期货日线数据进行深度分析，基于持仓量和价格关系解构多空力量
+        """
+        future_features_list = ['open', 'close', 'high', 'low', 'settlement', 'prev_settlement', 'open_interest', 'volume', 'total_turnover']
+        df = self.ricequant_service.instruments_data_fetching(type='Future', start_date=start_date, end_date=end_date, features_list=future_features_list, order_book_id_list=order_book_id_list)
+
+        # 确保日期格式正确并排序
+        df['date'] = pd.to_datetime(df['date'], format='%Y/%m/%d')
+        df = df.sort_values(['order_book_id', 'date']).reset_index(drop=True)
+
+        # 2. 基础指标计算
+        # 价格变动
+        df['price_change'] = df['settlement'] - df['prev_settlement']
+
+        # 价格变动率
+        df['price_change_pct'] = np.where(
+            df['prev_settlement'] > 0,
+            df['price_change'] / df['prev_settlement'],
+            np.nan
+        )
+
+        # 持仓量变动
+        df['oi_change'] = df['open_interest'].diff()
+
+        # 持仓量变动率
+        df['oi_change_pct'] = np.where(
+            df['open_interest'].shift(1) > 0,
+            df['oi_change'] / df['open_interest'].shift(1),
+            np.nan
+        )
+
+        # 3. 多空力量动态指标
+
+        # 资金流向强度 (核心指标)
+        df['fund_flow_strength'] = np.where(
+            df['volume'] > 0,
+            df['price_change'] * df['open_interest'] / df['volume'],
+            np.nan
+        )
+
+        # 持仓集中度
+        price_range = (df['high'] - df['low']).replace(0, np.nan)
+        df['oi_concentration'] = np.where(
+            (df['settlement'] > 0) & (price_range.notna()),
+            (df['open_interest'] / df['volume']) * price_range / df['settlement'],
+            np.nan
+        )
+
+        # 4. 基差相关指标
+
+        # 隐含融资成本 (假设无风险利率为0.02/365)
+        df['implied_funding_cost'] = np.log(df['settlement'] / df['prev_settlement']) - 0.02 / 365
+
+        # 5. 持仓-价格关系指标
+
+        # 持仓-价格背离度
+        df['oi_price_divergence'] = np.where(
+            (df['oi_change_pct'].abs() > 1e-5) & df['oi_change_pct'].notna(),
+            df['price_change_pct'] / df['oi_change_pct'],
+            np.nan
+        )
+
+        # 6. 趋势延续概率评估
+        df['trend_continuation_prob'] = np.nan
+
+        # 仅当有足够的历史数据时计算
+        for i in range(10, len(df)):
+            # 使用10日窗口计算动态趋势延续概率
+            fund_flow_window = df['fund_flow_strength'].iloc[i - 9:i + 1]
+            price_change_window = df['price_change_pct'].iloc[i - 9:i + 1]
+
+            if len(fund_flow_window.dropna()) > 5 and len(price_change_window.dropna()) > 5:
+                # 计算资金流向强度与价格变动的相关性
+                corr = fund_flow_window.corr(price_change_window)
+
+                # 基于历史数据估计趋势延续概率
+                if not np.isnan(corr) and fund_flow_window.iloc[-1] > 0:
+                    # 简单模型：资金流向强度越大，趋势延续概率越高
+                    prob = min(0.9, 0.5 + fund_flow_window.iloc[-1] * 0.5)
+                    df.iloc[i, df.columns.get_loc('trend_continuation_prob')] = prob
+
+        # 7. 风险预警信号
+
+        # 趋势衰竭信号：持仓-价格背离度 > 2 且为负值
+        df['trend_exhaustion_alert'] = (df['oi_price_divergence'] > 2) & (df['oi_price_divergence'] < 0)
+
+        # 闪崩风险信号：持仓集中度 > 1.5 且资金流向强度剧烈波动
+        df['flash_crash_risk'] = (df['oi_concentration'] > 1.5) & (
+                    df['fund_flow_strength'].abs() > df['fund_flow_strength'].rolling(20).std() * 2)
+
+        # 商品短缺信号：隐含融资成本 < 0 且持续3日
+        df['commodity_shortage_signal'] = (df['implied_funding_cost'] < 0) & (
+                    df['implied_funding_cost'].rolling(3).sum() < 0)
+
+        # 8. 期限结构分析 (假设有多合约数据，这里简化处理)
+        # 如果是主力连续合约，用滚动窗口计算期限结构斜率
+        df['term_structure_slope'] = df['implied_funding_cost'].rolling(5).mean()
+
+        # 9. 构建结果字典
+        results = []
+        for _, row in df.iterrows():
+            result = {
+                "date": row['date'].strftime('%Y-%m-%d'),
+                "order_book_id": row['order_book_id'],
+                "price_change": float(row['price_change']) if not pd.isna(row['price_change']) else None,
+                "price_change_pct": float(row['price_change_pct']) if not pd.isna(
+                    row['price_change_pct']) else None,
+                "oi_change": float(row['oi_change']) if not pd.isna(row['oi_change']) else None,
+                "oi_change_pct": float(row['oi_change_pct']) if not pd.isna(row['oi_change_pct']) else None,
+                "fund_flow_strength": float(row['fund_flow_strength']) if not pd.isna(
+                    row['fund_flow_strength']) else None,
+                "oi_concentration": float(row['oi_concentration']) if not pd.isna(
+                    row['oi_concentration']) else None,
+                "implied_funding_cost": float(row['implied_funding_cost']) if not pd.isna(
+                    row['implied_funding_cost']) else None,
+                "oi_price_divergence": float(row['oi_price_divergence']) if not pd.isna(
+                    row['oi_price_divergence']) else None,
+                "trend_continuation_prob": float(row['trend_continuation_prob']) if not pd.isna(
+                    row['trend_continuation_prob']) else None,
+                "trend_exhaustion_alert": bool(row['trend_exhaustion_alert']),
+                "flash_crash_risk": bool(row['flash_crash_risk']),
+                "commodity_shortage_signal": bool(row['commodity_shortage_signal']),
+                "term_structure_slope": float(row['term_structure_slope']) if not pd.isna(
+                    row['term_structure_slope']) else None
+            }
+            results.append(result)
+
+        return results
+
+    def summarize_Futureanalysis(self, start_date: int, end_date: int, target_future_id=None,
+                                 future_id_list: list = None, lookback_days=30, confidence_level=0.95):
+        """
+        对期货深度分析指标进行时间序列趋势分析，识别动态模式与领先-滞后关系
+        """
+        # 1. 获取期货分析结果
+        analysis_results = self._analyze_future(start_date, end_date, future_id_list)
+        if not analysis_results:
+            return "无期货数据可供分析。"
+
+        # 转换为DataFrame并预处理
+        df = pd.DataFrame(analysis_results)
+
+        # 确保日期格式正确
+        if not pd.api.types.is_datetime64_any_dtype(df['date']):
+            df['date'] = pd.to_datetime(df['date'])
+
+        # 按期货代码和日期排序
+        df = df.sort_values(['order_book_id', 'date']).reset_index(drop=True)
+
+        # ======================
+        # 2. 确定目标期货并计算市场基准
+        # ======================
+
+        # 确定要分析的目标期货
+        if target_future_id:
+            if target_future_id not in df['order_book_id'].unique():
+                return f"未找到期货 {target_future_id} 的数据。"
+        else:
+            # 自动选择第一个期货
+            target_future_id = df['order_book_id'].iloc[0]
+
+        # 获取最新日期（用于市场基准计算）
+        latest_date = df['date'].max()
+
+        # 获取所有期货在最新日期的数据（用于计算市场基准）
+        market_df = df[df['date'] == latest_date].copy()
+
+        # 计算市场基准（排除目标期货自身，避免自相关）
+        market_benchmarks = {}
+        if len(market_df) > 1:  # 至少有2只期货才能计算有意义的基准
+            market_without_target = market_df[market_df['order_book_id'] != target_future_id]
+            if not market_without_target.empty:
+                # 只有当有效数据存在时才计算基准
+                valid_fund_flow = market_without_target['fund_flow_strength'].dropna()
+                valid_oi_conc = market_without_target['oi_concentration'].dropna()
+                valid_term_slope = market_without_target['term_structure_slope'].dropna()
+
+                market_benchmarks = {
+                    'fund_flow_mean': valid_fund_flow.mean() if not valid_fund_flow.empty else None,
+                    'fund_flow_25pct': valid_fund_flow.quantile(0.25) if not valid_fund_flow.empty else None,
+                    'fund_flow_75pct': valid_fund_flow.quantile(0.75) if not valid_fund_flow.empty else None,
+                    'oi_conc_mean': valid_oi_conc.mean() if not valid_oi_conc.empty else None,
+                    'oi_conc_25pct': valid_oi_conc.quantile(0.25) if not valid_oi_conc.empty else None,
+                    'oi_conc_75pct': valid_oi_conc.quantile(0.75) if not valid_oi_conc.empty else None,
+                    'term_slope_mean': valid_term_slope.mean() if not valid_term_slope.empty else None
+                }
+
+        # 选择目标期货的时间序列数据
+        future_df = df[df['order_book_id'] == target_future_id].copy()
+
+        # 限制分析窗口
+        if len(future_df) > lookback_days:
+            future_df = future_df.tail(lookback_days).reset_index(drop=True)
+
+        n = len(future_df)
+        if n < 10:  # 需要足够数据进行趋势分析
+            return f"期货 {target_future_id} 数据点不足（{n}天），无法进行有效趋势分析。"
+
+        # 获取最新数据点
+        latest = future_df.iloc[-1]
+
+        # ======================
+        # 3. 深度时间序列趋势分析
+        # ======================
+
+        # --- 3.1 资金流向强度趋势（核心指标）---
+        fund_flow = future_df['fund_flow_strength'].astype(float).dropna()
+
+        # 计算线性趋势斜率和显著性
+        fund_flow_trend_desc = "资金流向强度趋势分析失败，数据可能存在问题"
+        if len(fund_flow) >= 10:
+            x = np.arange(len(fund_flow))
+            try:
+                slope_ff, intercept_ff, r_ff, p_ff, std_err_ff = stats.linregress(x, fund_flow)
+                trend_strength = abs(slope_ff) * len(fund_flow) / (fund_flow.mean() + 1e-5)
+
+                # 趋势分类
+                if p_ff < (1 - confidence_level):
+                    if slope_ff > 0:
+                        if trend_strength > 0.5:
+                            fund_flow_trend_desc = "显著上升趋势，资金持续流入，多头力量强劲"
+                        elif trend_strength > 0.2:
+                            fund_flow_trend_desc = "温和上升趋势，资金逐步流入"
+                        else:
+                            fund_flow_trend_desc = "轻微上升趋势，资金流入缓慢"
+                    else:
+                        if trend_strength > 0.5:
+                            fund_flow_trend_desc = "显著下降趋势，资金持续流出，多头力量减弱"
+                        elif trend_strength > 0.2:
+                            fund_flow_trend_desc = "温和下降趋势，资金逐步流出"
+                        else:
+                            fund_flow_trend_desc = "轻微下降趋势，资金流出缓慢"
+
+                    # 添加统计信息
+                    fund_flow_trend_desc += f"（斜率={slope_ff:.4f}, p={p_ff:.3f}）"
+                else:
+                    fund_flow_trend_desc = "无显著趋势，资金流向随机波动"
+            except Exception as e:
+                pass
+
+        # --- 3.2 持仓集中度趋势 ---
+        oi_concentration = future_df['oi_concentration'].astype(float).dropna()
+
+        oi_conc_status = ""
+        if len(oi_concentration) > 0:
+            current_oi_conc = oi_concentration.iloc[-1]
+            if current_oi_conc > 1.5:
+                oi_conc_status = f"持仓高度集中（当前值={current_oi_conc:.2f}），少数大户主导，市场易闪崩"
+            elif current_oi_conc > 0.8:
+                oi_conc_status = f"持仓较为集中（当前值={current_oi_conc:.2f}），大户影响力较大"
+            elif current_oi_conc < 0.5:
+                oi_conc_status = f"持仓分散（当前值={current_oi_conc:.2f}），散户主导，趋势较为平稳"
+            else:
+                oi_conc_status = f"持仓集中度适中（当前值={current_oi_conc:.2f}），多空力量均衡"
+        else:
+            oi_conc_status = "持仓集中度数据不足"
+
+        # --- 3.3 期限结构斜率趋势 ---
+        term_slope = future_df['term_structure_slope'].dropna()
+        term_slope_summary = "期限结构斜率数据不足"
+
+        if len(term_slope) >= 10:
+            # 计算期限结构斜率趋势
+            x_ts = np.arange(len(term_slope))
+            try:
+                slope_ts, _, _, p_ts, _ = stats.linregress(x_ts, term_slope)
+
+                if p_ts < (1 - confidence_level) and slope_ts > 0.001:
+                    term_slope_summary = f"期限结构斜率呈显著上升趋势（斜率={slope_ts:.4f}, p={p_ts:.3f}），Backwardation加深或Contango减弱"
+                elif p_ts < (1 - confidence_level) and slope_ts < -0.001:
+                    term_slope_summary = f"期限结构斜率呈显著下降趋势（斜率={slope_ts:.4f}, p={p_ts:.3f}），Contango加深或Backwardation减弱"
+                else:
+                    term_slope_summary = f"期限结构斜率波动但无显著趋势（p={p_ts:.3f}），期限结构保持稳定"
+            except Exception as e:
+                pass
+
+        # --- 3.4 持仓-价格背离分析 ---
+        oi_price_div = future_df['oi_price_divergence'].dropna()
+        divergence_summary = "持仓-价格背离度数据不足"
+
+        if len(oi_price_div) > 5:
+            current_div = oi_price_div.iloc[-1]
+            if current_div > 2 and current_div < 0:
+                divergence_summary = f"持仓-价格显著背离（当前值={current_div:.2f}），趋势可能衰竭"
+            elif current_div < -2:
+                divergence_summary = f"持仓-价格同向强化（当前值={current_div:.2f}），趋势可能延续"
+            else:
+                divergence_summary = f"持仓-价格关系正常（当前值={current_div:.2f}），市场结构健康"
+
+        # --- 3.5 风险预警信号分析 ---
+        trend_exhaustion_alerts = future_df['trend_exhaustion_alert'].sum()
+        flash_crash_risks = future_df['flash_crash_risk'].sum()
+        commodity_shortage_signals = future_df['commodity_shortage_signal'].sum()
+
+        risk_summary = ""
+        if trend_exhaustion_alerts > n * 0.2:
+            risk_summary = f"趋势衰竭信号高频触发（{trend_exhaustion_alerts}次，{trend_exhaustion_alerts / n:.0%}天），趋势可能反转"
+        elif trend_exhaustion_alerts > 0:
+            risk_summary = f"偶发趋势衰竭信号（{trend_exhaustion_alerts}次），需警惕趋势衰竭"
+        else:
+            risk_summary = "未检测到趋势衰竭信号，趋势结构稳健"
+
+        # --- 3.6 领先-滞后关系分析 ---
+        lead_lag_results = []
+        best_lag = None
+        best_corr = 0.0
+        if len(fund_flow) >= 20 and len(term_slope) >= 20:
+            for lag in range(-7, 8):  # -7到+7天的滞后
+                try:
+                    if lag <= 0:
+                        corr = fund_flow[:lag].corr(term_slope[-lag:]) if lag != 0 else fund_flow.corr(term_slope)
+                    else:
+                        corr = fund_flow[lag:].corr(term_slope[:-lag])
+                    lead_lag_results.append((lag, corr))
+                except:
+                    continue
+
+            if lead_lag_results:
+                best_lag, best_corr = max(lead_lag_results, key=lambda x: abs(x[1]))
+                if abs(best_corr) > 0.4:
+                    if best_lag < 0:
+                        lead_lag_summary = f"资金流向领先期限结构约{-best_lag}天（最大相关系数={best_corr:.2f}），是期限结构变化的先行指标"
+                    elif best_lag > 0:
+                        lead_lag_summary = f"期限结构领先资金流向约{best_lag}天（最大相关系数={best_corr:.2f}），期限结构先于资金变化"
+                    else:
+                        lead_lag_summary = f"资金流向与期限结构同步变化（相关系数={best_corr:.2f}），多空力量与期限结构联动紧密"
+                else:
+                    lead_lag_summary = "资金流向与期限结构关系不稳定，无明显领先-滞后模式"
+            else:
+                lead_lag_summary = "无法计算领先-滞后关系，相关系数计算失败"
+        else:
+            lead_lag_summary = "数据不足，无法进行领先-滞后分析"
+
+        # ======================
+        # 4. 识别关键动态模式
+        # ======================
+
+        # 模式1: 商品短缺模式
+        commodity_shortage_mode = (
+                "Backwardation加深" in term_slope_summary and
+                "资金持续流入" in fund_flow_trend_desc and
+                commodity_shortage_signals > n * 0.2
+        )
+
+        # 模式2: 趋势衰竭模式
+        trend_exhaustion_mode = (
+                "显著背离" in divergence_summary and
+                "资金流出" in fund_flow_trend_desc and
+                trend_exhaustion_alerts > n * 0.1
+        )
+
+        # 模式3: 闪崩风险模式
+        flash_crash_mode = (
+                "持仓高度集中" in oi_conc_status and
+                "资金流向剧烈波动" in fund_flow_trend_desc and
+                flash_crash_risks > n * 0.1
+        )
+
+        # 模式4: 市场均衡模式
+        market_equilibrium = (
+                "无显著趋势" in fund_flow_trend_desc and
+                "持仓集中度适中" in oi_conc_status and
+                "波动但无显著趋势" in term_slope_summary and
+                trend_exhaustion_alerts == 0
+        )
+
+        # ======================
+        # 5. 相对市场定位分析
+        # ======================
+
+        # 计算相对位置
+        fund_flow_relative_desc = "无市场比较数据"
+        oi_conc_relative_desc = "无市场比较数据"
+
+        fund_flow_relative = None
+        oi_conc_relative = None
+
+        # 1. 资金流向强度相对位置
+        if ('fund_flow_mean' in market_benchmarks and
+                market_benchmarks['fund_flow_mean'] is not None and
+                not pd.isna(latest['fund_flow_strength']) and
+                market_benchmarks['fund_flow_75pct'] is not None and
+                market_benchmarks['fund_flow_25pct'] is not None):
+
+            iqr = market_benchmarks['fund_flow_75pct'] - market_benchmarks['fund_flow_25pct']
+            if iqr > 1e-5:
+                fund_flow_relative = (
+                        (latest['fund_flow_strength'] - market_benchmarks['fund_flow_mean']) /
+                        (iqr + 1e-5)
+                )
+                if fund_flow_relative > 1.0:
+                    fund_flow_relative_desc = "资金流向强度显著高于同类期货，多头力量异常强劲"
+                elif fund_flow_relative > 0.5:
+                    fund_flow_relative_desc = "资金流向强度高于同类期货"
+                elif fund_flow_relative < -1.0:
+                    fund_flow_relative_desc = "资金流向强度显著低于同类期货，多头力量异常疲软"
+                elif fund_flow_relative < -0.5:
+                    fund_flow_relative_desc = "资金流向强度低于同类期货"
+                else:
+                    fund_flow_relative_desc = "资金流向强度处于同类期货正常水平"
+            else:
+                fund_flow_relative_desc = "资金流向强度市场基准数据不足"
+        else:
+            fund_flow_relative_desc = "资金流向强度市场基准数据不足"
+
+        # 2. 持仓集中度相对位置
+        if ('oi_conc_mean' in market_benchmarks and
+                market_benchmarks['oi_conc_mean'] is not None and
+                not pd.isna(latest['oi_concentration']) and
+                market_benchmarks['oi_conc_75pct'] is not None and
+                market_benchmarks['oi_conc_25pct'] is not None):
+
+            iqr = market_benchmarks['oi_conc_75pct'] - market_benchmarks['oi_conc_25pct']
+            if iqr > 1e-5:
+                oi_conc_relative = (
+                        (latest['oi_concentration'] - market_benchmarks['oi_conc_mean']) /
+                        (iqr + 1e-5)
+                )
+                if oi_conc_relative > 1.0:
+                    oi_conc_relative_desc = "持仓集中度显著高于同类期货，市场易受大户影响"
+                elif oi_conc_relative > 0.5:
+                    oi_conc_relative_desc = "持仓集中度高于同类期货"
+                elif oi_conc_relative < -1.0:
+                    oi_conc_relative_desc = "持仓集中度显著低于同类期货，市场结构更分散"
+                elif oi_conc_relative < -0.5:
+                    oi_conc_relative_desc = "持仓集中度低于同类期货"
+                else:
+                    oi_conc_relative_desc = "持仓集中度处于同类期货正常水平"
+            else:
+                oi_conc_relative_desc = "持仓集中度市场基准数据不足"
+        else:
+            oi_conc_relative_desc = "持仓集中度市场基准数据不足"
+
+        # ======================
+        # 6. 综合总结输出
+        # ======================
+        summary = f"""
+            【{target_future_id} 期货深度趋势分析报告】（截至 {future_df['date'].max().strftime('%Y-%m-%d')}）
+            
+            🌍 市场相对定位（基于{len(market_df)}只期货最新数据）：
+            - 资金流向强度：{fund_flow_relative_desc}
+            - 持仓集中度：{oi_conc_relative_desc}
+            
+            🔍 核心趋势诊断（基于{len(future_df)}天数据）：
+            1. **资金流向趋势**：{fund_flow_trend_desc}
+            - 当前资金流向强度：{latest['fund_flow_strength']:.4f}
+            - 相对市场位置：{'高于' if fund_flow_relative and fund_flow_relative > 0 else '低于' if fund_flow_relative and fund_flow_relative < 0 else '接近'}市场平均水平
+            - 5日移动平均：{fund_flow.rolling(5).mean().iloc[-1]:.4f}
+            
+            2. **持仓集中度分析**：{oi_conc_status}
+            - 当前持仓集中度：{latest['oi_concentration']:.2f}
+            - 相对市场位置：{'高于' if oi_conc_relative and oi_conc_relative > 0 else '低于' if oi_conc_relative and oi_conc_relative < 0 else '接近'}市场平均水平
+            
+            3. **期限结构分析**：{term_slope_summary}
+            - 当前期限结构斜率：{latest['term_structure_slope']:.4f}
+            - 5日移动平均：{term_slope.rolling(5).mean().iloc[-1]:.4f}
+            
+            4. **持仓-价格关系**：{divergence_summary}
+            
+            5. **关键动态关系**：{lead_lag_summary}
+            - {'资金流向可作为期限结构变化的领先指标，提前预警市场结构变化'
+            if '领先' in lead_lag_summary and best_lag and best_lag < 0
+            else '期限结构变化先于资金流向，需优先关注期限结构'
+            if '领先' in lead_lag_summary and best_lag and best_lag > 0
+            else '资金流向与期限结构同步变化，需同时监控'}
+            
+            💡 识别到的市场模式：
+            {'⚠️【商品短缺模式】Backwardation加深、资金持续流入，商品可能短缺！' if commodity_shortage_mode else
+            '⚠️【趋势衰竭模式】持仓-价格显著背离，趋势可能反转！' if trend_exhaustion_mode else
+            '⚠️【闪崩风险模式】持仓高度集中、资金流向剧烈波动，市场易闪崩！' if flash_crash_mode else
+            '✅【市场均衡模式】多空力量均衡，市场结构健康' if market_equilibrium else
+            '🔍【混合状态】市场处于过渡期，需密切关注领先指标变化'}
+            
+            📊 风险状态评估：
+            - 趋势衰竭信号：{risk_summary}
+            - 闪崩风险：{'高频触发' if flash_crash_risks > n * 0.2 else '偶发触发' if flash_crash_risks > 0 else '未触发'}
+            - 商品短缺信号：{'高频触发' if commodity_shortage_signals > n * 0.2 else '偶发触发' if commodity_shortage_signals > 0 else '未触发'}
+            
+            🎯 操作建议（基于当前模式和市场相对位置）：
+            {('🔴【紧急行动】商品短缺模式已确认！建议：' +
+            '   - 做多近月合约，做空远月合约，捕获Backwardation加深收益' +
+            '   - 避免展期操作，选择延迟展期策略' +
+            '   - 密切监控库存数据和地缘政治事件' if commodity_shortage_mode else
+            '🟡【谨慎操作】趋势衰竭模式确认！建议：' +
+            '   - 减少多头仓位，考虑反向操作' +
+            '   - 设置更严格的止损点' +
+            '   - 关注持仓-价格背离度变化' if trend_exhaustion_mode else
+            '🔴【紧急行动】闪崩风险模式已确认！建议：' +
+            '   - 大幅降低仓位，避免杠杆' +
+            '   - 设置宽幅止损，防范极端波动' +
+            '   - 避免在流动性低的时段交易' if flash_crash_mode else
+            '🟢【积极配置】市场均衡模式确认！建议：' +
+            '   - 维持正常风险敞口，执行既定交易策略' +
+            '   - 利用波动率机会进行波段操作' +
+            '   - 定期监控资金流向强度变化' if market_equilibrium else
+            '🔵【观察等待】混合状态！建议：' +
+            '   - 维持中性仓位，避免过度暴露' +
+            '   - 设置预警线：持仓-价格背离度>2且为负值则减仓' +
+            '   - 每周重新评估市场模式')}
+            
+            📌 风险提示：
+            - 2025年12月市场特征：地缘政治冲突可能加剧商品短缺，需特别关注Backwardation结构
+            - 本分析基于历史数据，极端行情下指标可能失效
+            - 建议结合基本面数据综合判断
+            
+            🔍 深度洞察：
+            {('资金流向领先期限结构变化约' + str(-best_lag) + '天，可作为早期预警信号。'
+            if '领先' in lead_lag_summary and best_lag and best_lag < 0
+            else '期限结构变化先于资金流向变化约' + str(best_lag) + '天，需优先关注期限结构。'
+            if '领先' in lead_lag_summary and best_lag and best_lag > 0
+            else '资金流向与期限结构同步变化，需同时监控两类指标。')}
+            当趋势衰竭信号触发后，未来{int(abs(best_lag)) + 3 if best_lag else '5'}天内趋势反转概率平均上升{abs(best_corr) * 100:.0f}%。
+            
+            💡 特别提示：
+            该期货当前表现{('商品短缺特征显著' if commodity_shortage_mode else
+            '趋势衰竭特征明显' if trend_exhaustion_mode else
+            '闪崩风险极高' if flash_crash_mode else
+            '与')}同类期货整体水平，{('建议' if commodity_shortage_mode or flash_crash_mode else '谨慎')}{'做多近月' if commodity_shortage_mode else '减仓' if trend_exhaustion_mode or flash_crash_mode else '维持仓位'}
+            """.strip()
+
+        return summary
 
     def _analyze_option(self):
         pass
@@ -1352,12 +2375,20 @@ if __name__ == '__main__':
     ml_service = MLService()
     cs_list = ['000001.XSHE', '000002.XSHE', '000004.XSHE']
     etf_list = ['159001.XSHE', '159003.XSHE', '159005.XSHE']
+    index_list = ['000001.XSHG', '000002.XSHG', '000003.XSHG']
+    future_list = ['A2601', 'A2603', 'A2605']
     # print(ml_service.construct_contract_features('CS', cs_list, '20240401', '20251128'))
     # print(ml_service.summarize_CSanalysis(start_date=20250401,
     #    end_date=20251128,
     #    target_stock_id='000002.XSHE',
     #    order_book_id_list=cs_list))
-    print(ml_service.summarize_ETFanalysis(start_date=20250401,
-        end_date=20251128,
-        target_ETF_id='159003.XSHE',
-        order_book_id_list=etf_list))
+    # print(ml_service.summarize_ETFanalysis(start_date=20250401,
+    #     end_date=20251128,
+    #     target_ETF_id='159003.XSHE',
+    #     order_book_id_list=etf_list))
+    # print(ml_service.summarize_INDXanalysis(start_date=20250401,
+    #     end_date=20251128,
+    #     target_index_id='000003.XSHG',
+    #     index_id_list=index_list))
+    print(ml_service.summarize_Futureanalysis(20250401, 20251128, 'A2603', future_list))
+

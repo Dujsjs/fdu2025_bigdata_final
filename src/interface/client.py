@@ -3,7 +3,7 @@ from src.services.llm_service import init_llm_and_embed_models
 from src.agent.tools import get_rag_service
 import asyncio
 from src.services.intent_recognition import intent_recognition
-from src.services.params_fetching import get_param_CSanalysis, get_param_ETFanalysis
+from src.services.params_fetching import get_param_CSanalysis, get_param_ETFanalysis, get_param_INDXanalysis, get_param_FUTUREanalysis
 from src.services.ml_service import MLService
 
 async def main_async():
@@ -70,11 +70,21 @@ async def main_async():
                                                         order_book_id_list=etf_params['ETF_id_list']))
                         final_answer += etf_analysis+'\n'+'\n'
                     elif user_query == 'INDX':
-                        pass
+                        index_params = get_param_INDXanalysis()
+                        index_analysis = str(ml_service.summarize_INDXanalysis(start_date=index_params['start_date'],
+                                                        end_date=index_params['end_date'],
+                                                        target_index_id=index_params['target_index_id'],
+                                                        index_id_list=index_params['index_id_list']))
+                        final_answer += index_analysis + '\n' + '\n'
                     elif user_query == 'Future':
-                        pass
-                    elif user_query == 'Option':
-                        pass
+                        future_params = get_param_FUTUREanalysis()
+                        future_analysis = str(ml_service.summarize_Futureanalysis(start_date=future_params['start_date'],
+                                                        end_date=future_params['end_date'],
+                                                        target_future_id=future_params['target_future_id'],
+                                                        future_id_list=future_params['future_id_list']))
+                        final_answer += future_analysis + '\n' + '\n'
+                    # elif user_query == 'Option':   # 量化API接口暂无权限，无法分析
+                    #     pass
 
             print(f"\n🤖 顾问: {final_answer}")
         except Exception as e:

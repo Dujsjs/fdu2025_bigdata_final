@@ -127,6 +127,126 @@ def is_valid_ETF_code(code_str: str) -> bool:
     print(f"校验失败: {code_str}，非标准的 ETF 代码前缀。ETF代码应以 51(上交所)、159或16(深交所) 开头。")
     return False
 
+def is_valid_index_code(code_str: str) -> bool:
+    """
+    检查一个字符串是否是有效的指数代码。
+
+    指数代码规则：
+    - 上交所指数：000xxx 开头，后缀为 .XSHG
+    - 深交所指数：399xxx 开头，后缀为 .XSHE
+    - 中证指数：000xxx 开头，后缀为 .XSHE 或 .XSHG（如中证系列指数）
+    - 港股指数：如恒生指数等特殊格式，但主要关注A股市场
+
+    参数:
+        code_str (str): 要检查的指数代码字符串，例如 '000001.XSHG'。
+
+    返回:
+        bool: 如果代码格式合法，则返回 True；否则返回 False。
+    """
+    import re
+
+    # 1. 使用正则表达式匹配基本结构：6位数字 + 点号 + 字母后缀
+    match = re.match(r'^(\d{6})\.([A-Z]{2,4})$', code_str)
+
+    if not match:
+        # 如果格式不符合 "6位数字.后缀" 的模式
+        return False
+
+    index_id, suffix = match.groups()
+
+    # 2. 定义合法的指数代码前缀和后缀
+
+    # 上交所指数的代码前缀：000开头 (如000001上证指数, 000300沪深300等)
+    SH_INDEX_PREFIXES = ('000')
+    # 上交所指数的合法后缀
+    SH_SUFFIXES = ('XSHG',)
+
+    # 深交所指数的代码前缀：399开头 (如399001深证成指, 399006创业板指等)
+    SZ_INDEX_PREFIXES = ('399')
+    # 深交所指数的合法后缀
+    SZ_SUFFIXES = ('XSHE',)
+
+    # 中证指数（也以000开头，但可能在深交所系统中）
+    CSI_INDEX_PREFIXES = ('000')
+    # 中证系列指数可能使用XSHE后缀
+    CSI_SUFFIXES = ('XSHE', 'XSHG')
+
+    # 3. 进行交易所匹配和校验
+
+    # 上交所指数校验：代码以 000 开头，后缀必须是 XSHG
+    if index_id.startswith(SH_INDEX_PREFIXES):
+        if suffix in SH_SUFFIXES:
+            return True
+        elif suffix in CSI_SUFFIXES:  # 也可能是中证指数
+            return True
+        else:
+            # 000开头的代码不能使用XSHE后缀（除非是中证系列）
+            print(f"校验失败: {code_str}，上证指数代码使用了非上证后缀。")
+            return False
+
+    # 深交所指数校验：代码以 399 开头，后缀必须是 XSHE
+    elif index_id.startswith(SZ_INDEX_PREFIXES):
+        if suffix in SZ_SUFFIXES:
+            return True
+        else:
+            # 399开头的代码不能使用XSHG后缀
+            print(f"校验失败: {code_str}，深证指数代码使用了非深证后缀。")
+            return False
+
+    # 4. 如果前缀不符合指数的标准前缀，则视为无效指数代码
+    print(f"校验失败: {code_str}，非标准的指数代码前缀。指数代码应以 000(上证/中证) 或 399(深证) 开头。")
+    return False
+
+def is_valid_future_code(code_str: str) -> bool:
+    """
+    检查一个字符串是否是有效的期货代码。
+
+    期货代码规则：
+    - 中国期货市场：字母+数字组合，如A2601（大豆期货26年1月合约）、CU2601（铜期货26年1月合约）
+    - 通常格式：字母1-3位代表品种 + 数字4位代表年月（后两位年份+后两位月份）
+    - 月份范围：01-12
+
+    参数:
+        code_str (str): 要检查的期货代码字符串，例如 'A2601'。
+
+    返回:
+        bool: 如果代码格式合法，则返回 True；否则返回 False。
+    """
+    import re
+
+    # 1. 使用正则表达式匹配基本结构：字母+数字
+    # 模式：1-3个字母 + 4位数字
+    pattern = r'^[A-Za-z]{1,3}\d{4}$'
+
+    if not re.match(pattern, code_str):
+        # 如果格式不符合 "字母+数字" 的模式
+        return False
+
+    # 2. 提取年份和月份部分
+    year_month = code_str[-4:]  # 取最后4位
+    month_str = year_month[2:]  # 月份（后两位）
+
+    try:
+        month = int(month_str)
+
+        # 3. 验证月份范围：01-12
+        if month < 1 or month > 12:
+            return False
+
+        # 4. 验证品种代码部分（前缀字母）
+        # 中国期货品种代码通常是1-3位大写字母
+        symbol_part = code_str[:-4].upper()
+
+        # 验证前缀是否为1-3位字母
+        if len(symbol_part) >= 1 and len(symbol_part) <= 3 and symbol_part.isalpha():
+            return True
+        else:
+            return False
+
+    except ValueError:
+        # 如果转换为整数失败
+        return False
+
 def validate_and_convert_date(date_str: str) -> str | None:
     """
     验证并转换日期字符串为YYYYMMDD格式，失败则返回None
@@ -457,10 +577,289 @@ def get_param_ETFanalysis():
 
     return data_dict
 
+def get_param_INDXanalysis():
+    """
+    为指数分析获取参数
+    :return: 参数字典
+    """
+    data_dict = {
+        "start_date": None,
+        "end_date": None,
+        "target_index_id": None,
+        "index_id_list": None
+    }
+    has_mem = False
+    need_refreshment = False
+    INDX_mem_addr = os.path.join(MEM_addr, 'INDXanalysis_mem.json')
+
+    if os.path.exists(INDX_mem_addr):
+        data_dict = load_params_from_json(INDX_mem_addr)
+        if not data_dict:
+            need_refreshment = True
+        else:
+            has_mem = True
+
+    if has_mem:
+        print(f"关于指数分析，历史记忆中的分析参数为：{data_dict}")
+        temp_judge = input('您是否需要指定新的参数(Y/N)？')
+        if temp_judge == 'Y':
+            need_refreshment = True
+            data_dict = {
+                "start_date": None,
+                "end_date": None,
+                "target_index_id": None,
+                "index_id_list": None
+            }
+        else:
+            print("继续使用历史记忆中的分析参数！")
+    else:
+        print("未找到历史记忆中的分析参数，请指定分析参数！")
+        need_refreshment = True
+
+    if need_refreshment:
+        # 循环获取参数直到所有参数都已填充
+        pass_index_id = False  # 跳过index_id的选择，注意要放到循环体之外
+
+        while True:
+            # 获取开始日期
+            if data_dict["start_date"] is None:
+                start_date = input("请输入开始日期 (格式: YYYYMMDD): ")
+                if start_date.strip():
+                    start = validate_and_convert_date(start_date)
+                    if start:
+                        data_dict["start_date"] = start
+                    else:
+                        print(f"错误：无效的开始日期: {start_date}，请稍后重新输入")
+
+            # 获取结束日期
+            if data_dict["end_date"] is None:
+                end_date = input("请输入结束日期 (格式: YYYYMMDD): ")
+                if end_date.strip():
+                    end = validate_and_convert_date(end_date)
+                    if end:
+                        if data_dict["start_date"] and data_dict["start_date"] <= end:
+                            data_dict["end_date"] = end
+                        else:
+                            print("错误：开始日期不能大于结束日期，请稍后重新输入")
+                    else:
+                        print(f"错误：无效的结束日期: {end_date}，请稍后重新输入")
+
+            # 获取目标指数 ID
+            if data_dict["target_index_id"] is None:
+                target_index_id = input("请输入待研究的目标指数 ID:（形如000001.XSHG,399001.XSHE）")
+                if is_valid_index_code(target_index_id.strip()):
+                    data_dict["target_index_id"] = target_index_id.strip()
+                else:
+                    print(f"错误：无效的指数 ID: {target_index_id}，请稍后重新输入")
+
+            # 获取指数 ID 列表
+            if pass_index_id == False:
+                add_index = input("是否添加用于建模的指数 ID 列表(Y/N)? 注意：若不添加则默认选择全体指数分析，速度较慢！")
+                try:
+                    if add_index.upper() == 'Y':
+                        index_ids_input = input("请输入用于建模的指数 ID 列表，用英文逗号分割:（形如000001.XSHG, 000003.XSHG）")
+                        if index_ids_input.strip():
+                            # 将输入的逗号分隔字符串转换为列表，并去除每个ID的首尾空格
+                            index_ids = []
+                            for id in index_ids_input.split(','):
+                                if is_valid_index_code(id.strip()):
+                                    index_ids.append(id.strip())
+                                else:
+                                    print(f"错误：无效的指数 ID: {id.strip()}，请稍后重新输入")
+
+                            # 检查列表是否有效
+                            if index_ids:
+                                data_dict["index_id_list"] = index_ids
+                                print(f"已添加指数 ID 列表: {index_ids}")
+                                pass_index_id = True
+                            else:
+                                print("未检测到有效的指数 ID，请重新输入")
+                    elif add_index.upper() == 'N':
+                        # 用户选择不添加特定指数，保留空列表表示使用全部指数
+                        print("将使用全部指数进行分析！")
+                        pass_index_id = True
+                    else:
+                        print("未检测到有效的指数 ID，请重新输入")
+                except AttributeError:
+                    # 处理add_index为None的情况
+                    print("未检测到有效的指数 ID，请重新输入")
+                except Exception as e:
+                    # 处理其他未预期的异常
+                    print(f"处理指数 ID 列表时发生错误: {e}")
+                    print("未检测到有效的指数 ID，请重新输入")
+
+            # 检查是否所有必需参数都已获取
+            all_filled = (
+                    data_dict["start_date"] is not None and
+                    data_dict["end_date"] is not None and
+                    data_dict["target_index_id"] is not None and
+                    pass_index_id
+            )
+
+            if all_filled:
+                print("所有参数已获取完毕！")
+                print(f"最终参数: {data_dict}")
+                # 保存参数到记忆文件
+                save_params_to_json(data_dict, INDX_mem_addr)
+                break
+            else:
+                missing_params = []
+                if data_dict["start_date"] is None:
+                    missing_params.append("开始日期")
+                if data_dict["end_date"] is None:
+                    missing_params.append("结束日期")
+                if data_dict["target_index_id"] is None:
+                    missing_params.append("待研究的目标指数 ID")
+                if not pass_index_id:
+                    missing_params.append("用于建模的指数 ID 列表")
+                print(f"以下参数尚未填写完成: {', '.join(missing_params)}。请继续填写...")
+
+    return data_dict
+
+def get_param_FUTUREanalysis():
+    """
+    为期货分析获取参数
+    :return: 参数字典
+    """
+    data_dict = {
+        "start_date": None,
+        "end_date": None,
+        "target_future_id": None,
+        "future_id_list": None
+    }
+    has_mem = False
+    need_refreshment = False
+    FUTURE_mem_addr = os.path.join(MEM_addr, 'FUTUREanalysis_mem.json')
+
+    if os.path.exists(FUTURE_mem_addr):
+        data_dict = load_params_from_json(FUTURE_mem_addr)
+        if not data_dict:
+            need_refreshment = True
+        else:
+            has_mem = True
+
+    if has_mem:
+        print(f"关于期货分析，历史记忆中的分析参数为：{data_dict}")
+        temp_judge = input('您是否需要指定新的参数(Y/N)？')
+        if temp_judge == 'Y':
+            need_refreshment = True
+            data_dict = {
+                "start_date": None,
+                "end_date": None,
+                "target_future_id": None,
+                "future_id_list": None
+            }
+        else:
+            print("继续使用历史记忆中的分析参数！")
+    else:
+        print("未找到历史记忆中的分析参数，请指定分析参数！")
+        need_refreshment = True
+
+    if need_refreshment:
+        # 循环获取参数直到所有参数都已填充
+        pass_future_id = False  # 跳过future_id的选择，注意要放到循环体之外
+
+        while True:
+            # 获取开始日期
+            if data_dict["start_date"] is None:
+                start_date = input("请输入开始日期 (格式: YYYYMMDD): ")
+                if start_date.strip():
+                    start = validate_and_convert_date(start_date)
+                    if start:
+                        data_dict["start_date"] = start
+                    else:
+                        print(f"错误：无效的开始日期: {start_date}，请稍后重新输入")
+
+            # 获取结束日期
+            if data_dict["end_date"] is None:
+                end_date = input("请输入结束日期 (格式: YYYYMMDD): ")
+                if end_date.strip():
+                    end = validate_and_convert_date(end_date)
+                    if end:
+                        if data_dict["start_date"] and data_dict["start_date"] <= end:
+                            data_dict["end_date"] = end
+                        else:
+                            print("错误：开始日期不能大于结束日期，请稍后重新输入")
+                    else:
+                        print(f"错误：无效的结束日期: {end_date}，请稍后重新输入")
+
+            # 获取目标期货 ID
+            if data_dict["target_future_id"] is None:
+                target_future_id = input("请输入待研究的目标期货 ID:（形如A2601）")
+                if is_valid_future_code(target_future_id.strip()):
+                    data_dict["target_future_id"] = target_future_id.strip()
+                else:
+                    print(f"错误：无效的期货 ID: {target_future_id}，请稍后重新输入")
+
+            # 获取期货 ID 列表
+            if pass_future_id == False:
+                add_future = input("是否添加用于建模的期货 ID 列表(Y/N)? 注意：若不添加则默认选择全体期货分析，速度较慢！")
+                try:
+                    if add_future.upper() == 'Y':
+                        future_ids_input = input("请输入用于建模的期货 ID 列表，用英文逗号分割:（形如A2601,A2605）")
+                        if future_ids_input.strip():
+                            # 将输入的逗号分隔字符串转换为列表，并去除每个ID的首尾空格
+                            future_ids = []
+                            for id in future_ids_input.split(','):
+                                if is_valid_future_code(id.strip()):
+                                    future_ids.append(id.strip())
+                                else:
+                                    print(f"错误：无效的期货 ID: {id.strip()}，请稍后重新输入")
+
+                            # 检查列表是否有效
+                            if future_ids:
+                                data_dict["future_id_list"] = future_ids
+                                print(f"已添加期货 ID 列表: {future_ids}")
+                                pass_future_id = True
+                            else:
+                                print("未检测到有效的期货 ID，请重新输入")
+                    elif add_future.upper() == 'N':
+                        # 用户选择不添加特定期货，保留空列表表示使用全部期货
+                        print("将使用全部期货进行分析！")
+                        pass_future_id = True
+                    else:
+                        print("未检测到有效的期货 ID，请重新输入")
+                except AttributeError:
+                    # 处理add_future为None的情况
+                    print("未检测到有效的期货 ID，请重新输入")
+                except Exception as e:
+                    # 处理其他未预期的异常
+                    print(f"处理期货 ID 列表时发生错误: {e}")
+                    print("未检测到有效的期货 ID，请重新输入")
+
+            # 检查是否所有必需参数都已获取
+            all_filled = (
+                    data_dict["start_date"] is not None and
+                    data_dict["end_date"] is not None and
+                    data_dict["target_future_id"] is not None and
+                    pass_future_id
+            )
+
+            if all_filled:
+                print("所有参数已获取完毕！")
+                print(f"最终参数: {data_dict}")
+                # 保存参数到记忆文件
+                save_params_to_json(data_dict, FUTURE_mem_addr)
+                break
+            else:
+                missing_params = []
+                if data_dict["start_date"] is None:
+                    missing_params.append("开始日期")
+                if data_dict["end_date"] is None:
+                    missing_params.append("结束日期")
+                if data_dict["target_future_id"] is None:
+                    missing_params.append("待研究的目标期货 ID")
+                if not pass_future_id:
+                    missing_params.append("用于建模的期货 ID 列表")
+                print(f"以下参数尚未填写完成: {', '.join(missing_params)}。请继续填写...")
+
+    return data_dict
+
 if __name__ == '__main__':
     # get_param_CSanalysis()
-    get_param_ETFanalysis()
-
+    # get_param_ETFanalysis()
+    # print(get_param_INDXanalysis())
+    print(get_param_FUTUREanalysis())
 
 
 
