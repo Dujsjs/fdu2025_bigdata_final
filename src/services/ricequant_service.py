@@ -590,6 +590,77 @@ class RiceQuantService:
         data.reset_index(inplace=True, drop=True)
         return data
 
+    def industry_data_fetching(self, order_book_ids, source='sws', level=1, market='cn',
+                               max_age_days=settings.financial_data.update_frequency):
+        """
+        用于下载/更新行业信息，若在有效期内则无需更新
+        """
+        # 创建缓存目录
+        cache_dir = os.path.join(settings.project.project_dir, settings.paths.financial_data)
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # 处理日期参数（作为文件名的一部分）
+        current_date_str = datetime.now().strftime("%Y%m%d")
+
+        # 处理 order_book_ids 参数
+        # 将列表转换为排序后的字符串，然后生成哈希，以确保顺序无关性和文件名不会过长
+        sorted_ids_str = ",".join(sorted(order_book_ids))
+        ids_hash = hashlib.md5(sorted_ids_str.encode('utf-8')).hexdigest()[:10]
+
+        # 将其他参数也纳入文件名考虑，确保不同参数组合的数据分开缓存
+        params_str = f"{source}_{level}_{market}"
+        # 如果 params_str 可能包含特殊字符，也可以考虑哈希处理，这里假设它是安全的
+        file_suffix = f"indus_{ids_hash}_{params_str}.csv"
+
+        # 在缓存目录下搜索匹配的文件
+        existing_file = None
+        for filename in os.listdir(cache_dir):
+            if filename.endswith(file_suffix):
+                existing_file = filename
+                break
+
+        new_filename = f"{current_date_str}_{file_suffix}"
+        output_file_path = os.path.join(cache_dir, new_filename)
+
+        if existing_file is not None:  # 存在目标参数的行业数据文件
+            file_path = os.path.join(cache_dir, existing_file)
+            file_date_str = existing_file.split('_')[0]  # 提取文件名开头的日期部分
+
+            try:
+                file_date = datetime.strptime(file_date_str, "%Y%m%d")
+            except ValueError:
+                # 如果文件名格式不正确，无法解析日期，则强制重新下载
+                print(f"无法解析现有缓存文件 '{existing_file}' 的日期，将重新下载。")
+                file_date = datetime.min  # 设置为一个很早的日期，确保下面的判断会触发下载
+
+            # 执行数据更新逻辑
+            if (datetime.now() - file_date).days > max_age_days:
+                print(f"行业数据缓存超过 {max_age_days} 天，需要更新。")
+                indus_data = rqdatac.get_instrument_industry(order_book_ids, source=source, level=level, market=market)
+                if indus_data is not None and not indus_data.empty:
+                    indus_data.reset_index(inplace=True, drop=False)
+                    indus_data.to_csv(output_file_path, index=False)
+                    os.remove(file_path)  # 删除旧缓存文件
+                    print("行业数据更新完成！")
+                    return output_file_path
+                else:
+                    print("行业数据下载失败或为空，返回旧缓存文件。")
+                    return file_path  # 如果下载失败，返回旧文件
+            else:
+                print(f"行业数据缓存已存在且未超过 {max_age_days} 天，无需更新。")
+                return file_path
+        else:  # 不存在目标参数的行业数据文件
+            print("行业数据缓存不存在，开始下载...")
+            indus_data = rqdatac.get_instrument_industry(order_book_ids, source=source, level=level, market=market)
+            if indus_data is not None and not indus_data.empty:
+                indus_data.reset_index(inplace=True, drop=False)
+                indus_data.to_csv(output_file_path, index=False)
+                print("行业数据下载完成！")
+                return output_file_path
+            else:
+                print("行业数据下载失败或为空，无法创建缓存文件。")
+                return None  # 下载失败，返回 None 或抛出异常
+
 if __name__ == '__main__':
     tmp = RiceQuantService()
     # print(tmp.query_stock_info('INDX', query_by_code='000001'))
@@ -610,6 +681,11 @@ if __name__ == '__main__':
     # print(tmp._update_price_data(instru_type='Option', start_date=20250601, end_date=20251128, fields=['open', 'close', 'high', 'low', 'settlement', 'prev_settlement', 'open_interest', 'volume', 'strike_price', 'contract_multiplier']))
 
     # print(tmp.instruments_data_fetching(type='CS', start_date=20251001, end_date=20251128, features_list=['open', 'close', 'high', 'low', 'limit_up', 'limit_down', 'total_turnover', 'volume', 'num_trades', 'prev_close'], order_book_id_list=['000001.XSHE', '000002.XSHE']))
-    tmp_data = tmp.factors_data_fetching('CS', settings.factors.fundamental_fields, 20250401, 20251128, ['000001.XSHE', '000002.XSHE', '000004.XSHE'])
-    print(tmp_data)
+    # tmp_data = tmp.factors_data_fetching('CS', settings.factors.fundamental_fields, 20250401, 20251128, ['000001.XSHE', '000002.XSHE', '000004.XSHE'])
+    # print(tmp_data)
+
+    file_path = os.path.join(settings.project.project_dir, settings.paths.financial_data, '20251208_CS_instru.csv')
+    data = pd.read_csv(file_path)
+    order_book_ids = data['order_book_id'].tolist()   # 全部的股票id
+    print(tmp.industry_data_fetching(order_book_ids=order_book_ids))   # 获取行业数据
 

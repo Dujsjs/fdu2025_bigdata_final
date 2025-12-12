@@ -48,8 +48,10 @@ class factorsConfig(BaseModel):
 
 class mlModelConfig(BaseModel):
     parameters: dict
+    train_ratio: float
+    val_ratio: float
     cv_fold: int
-    early_stopping_rounds: int
+    cv_metric: str
     num_boost_rounds: int
 
 class PathsConfig(BaseModel):
