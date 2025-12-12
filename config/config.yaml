@@ -38,6 +38,50 @@ financial_data:
   rice_quant_uri: "tcp://license:BMyPixcVQXxsui5fCmvH9BOD5n_k9npLQLbHruaWk_4ov3ge25hLxtOQILddXB00y1UPnGXWXUga2a66ScdKwiGsO4a_CXga2ItID0nVzPOSSF5YVh2CgHbUVq2tlyfezRDSyFSLu0clL9IYVmL8__t7tsB9P-L6w7JLGPEh8Ps=NWFZwzx0mh2GCDPPsU9FdAGWH4plnfS-a6f-9cI9t-AqVo9qajWy-pnNwHTfsdMBtIedP21AU1i8f1Is86lsl_MAyjkoPEIZaL1ZPLzBofhmJB9IetIoENUc0Kw91mVgTTFtAf9MeML05qLgBxplRZkLyEVPl-hA4vW5PTlpXtg=@rqdatad-pro.ricequant.com:16011"
   features_max_rolling_window: 60
 
+# 因子配置
+factors:
+    fundamental_fields: [
+      # 价值因子 (Value Factors)
+          'pb_ratio_ttm',
+          'pe_ratio_ttm',
+          'cfp_ratio_ttm',
+          'book_to_market_ratio_ttm',
+          'ev_to_ebitda_ttm',
+
+      # 质量因子 (Quality Factors)
+          'return_on_equity_ttm',
+          'gross_profit_margin_ttm',
+          'surplus_cash_protection_multiples_ttm',
+          'operating_cycle_ttm',
+          'ocf_to_net_debt_ttm',
+
+      # 规模因子 (Size Factors)
+          'market_cap_3',
+          'a_share_market_val_in_circulation',
+
+      # 盈利能力因子 (Profitability Factors)
+          'net_profit_growth_ratio_ttm',
+          'operating_profit_to_profit_before_tax_ttm',
+          'net_profit_margin_ttm',
+          'return_on_asset_ttm',
+
+      # 成长因子 (Growth Factors)
+          'inc_revenue_ttm',
+          'net_profit_parent_company_growth_ratio_ttm',
+          'net_operate_cash_flow_growth_ratio_ttm',
+          'total_asset_growth_ratio_ttm',
+
+      # 财务稳健性因子 (Financial Stability Factors)
+          'debt_to_asset_ratio_ttm',
+          'time_interest_earned_ratio_ttm',
+          'current_ratio_ttm',
+          'cash_ratio_ttm',
+
+      # 计算ASSET_QUALITY所需的字段
+          'total_assets_mrq_0',
+          'goodwill_mrq_0'
+    ]   # 基本面因子字段(直接从api获取)
+
 # 模型配置
 mlModels:
   cv_fold: 10
@@ -60,6 +104,7 @@ mlModels:
 paths:
   raw_data: "data/raw"
   financial_data: "data/financial_data"
+  factor_data: "data/factor_data"
   processed_data: "data/processed"
   trained_models: "data/trained_models"
   ml_packs: 'data/ml_packs'

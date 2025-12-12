@@ -43,6 +43,9 @@ class financialDataConfig(BaseModel):
     rice_quant_uri: str
     features_max_rolling_window: int
 
+class factorsConfig(BaseModel):
+    fundamental_fields: list
+
 class mlModelConfig(BaseModel):
     parameters: dict
     cv_fold: int
@@ -52,6 +55,7 @@ class mlModelConfig(BaseModel):
 class PathsConfig(BaseModel):
     raw_data: str
     financial_data: str
+    factor_data: str
     processed_data: str
     trained_models: str
     ml_packs: str
@@ -63,10 +67,10 @@ class AppConfig(BaseModel):
     llm: LLMConfig
     embedding: EmbeddingConfig
     financial_data: financialDataConfig
+    factors: factorsConfig
     rag: RAGConfig
     mlModels: mlModelConfig
     paths: PathsConfig
-
 
 # --- 配置加载函数 ---
 def load_config() -> AppConfig:
