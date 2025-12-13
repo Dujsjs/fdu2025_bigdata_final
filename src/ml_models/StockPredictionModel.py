@@ -4,17 +4,26 @@ from src.services.ricequant_service import RiceQuantService
 from src.core.load_config import settings
 import lightgbm as lgb
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import joblib
 import warnings
+import hashlib
+import os
 warnings.filterwarnings('ignore')
 ricequant_service = RiceQuantService()
 
 class StockPredictionModel:
-    def __init__(self, start_date:int, end_date:int, order_book_id_list: list = None):
+    def __init__(self, start_date:int, end_date:int, target_stock_id: str, order_book_id_list: list = None):
         self.start_date = start_date
         self.end_date = end_date
+        self.target_stock_id = target_stock_id
         self.order_book_id_list = order_book_id_list
+        if self.target_stock_id not in self.order_book_id_list:
+            self.order_book_id_list.append(self.target_stock_id)
         self.model = None
-        self.model_performace = None
+        self.model_performance = None
+        self.factor_data_for_prediction = None
+        self.factor_columns = None
+        self.predicted_excess_return = None
 
     def _get_technical_factors(self, start_date:int, end_date:int, order_book_id_list: list = None):
         """
@@ -141,13 +150,16 @@ class StockPredictionModel:
                 lambda x: (x - x.mean()) / x.std()
             )
 
-        return factors, factor_columns, y_column
+        return factors, list(factor_columns), y_column
 
     def _train(self):
         """
         从包含因子和目标变量的DataFrame训练一个LightGBM模型
         """
         df, feature_columns, target_column = self._build_dataset()
+        self.factor_data_for_prediction = df[df['order_book_id'] == self.target_stock_id]
+        self.factor_columns = feature_columns
+        df = df[df['order_book_id'] != self.target_stock_id]
         n_cv_splits = settings.mlModels.cv_fold
         lgb_params = settings.mlModels.parameters
         train_ratio = settings.mlModels.train_ratio
@@ -412,9 +424,55 @@ class StockPredictionModel:
         print(results_df)
 
         # 可选：将结果存储到对象属性中
-        self.evaluation_results = results_df
+        self.model_performance = results_df
 
         return final_model, results_df  # 返回模型和评估结果
+
+    def _save_model(self, file_path: str):
+        """
+        保存模型实例到本地文件
+        """
+        joblib.dump(self, file_path)
+        print(f"模型已保存至: {file_path}")
+
+    def _make_prediction(self):
+        """
+        使用模型进行预测
+        """
+        if not self.predicted_excess_return:
+            X_pred = self.factor_data_for_prediction[list(self.factor_columns)].mean().values.reshape(1, -1)   # 使用历次的时间序列均值作为预测因子
+            predicted_excess_return = self.model.predict(X_pred)[0]
+            self.predicted_excess_return = predicted_excess_return
+            return f"目标股票{self.target_stock_id}的次日超额收益率预测值为{predicted_excess_return:.6f}"
+        else:
+            return f"目标股票{self.target_stock_id}的次日超额收益率预测值为{self.predicted_excess_return:.6f}"
+
+    @classmethod
+    def runWholeProcedure(cls, start_date:int, end_date:int, target_stock_id: str, order_book_id_list: list = None) -> 'StockPredictionModel':
+        """
+        从指定路径加载StockPredictionModel实例（自动训练）
+        """
+        final_answer = ''
+        selected_contracts_id_hash = 'None'
+        if order_book_id_list:
+            order_book_id_list_str = ','.join(sorted(order_book_id_list))
+            selected_contracts_id_hash = hashlib.md5(order_book_id_list_str.encode('utf-8')).hexdigest()[:10]
+        pack_name = f"{start_date}_{end_date}_{target_stock_id}_{selected_contracts_id_hash}_MLmodel.joblib"
+        pack_save_path = os.path.join(settings.project.project_dir, settings.paths.ml_packs, pack_name)
+        if os.path.exists(pack_save_path):
+            model_instance = joblib.load(pack_save_path)
+            print('成功从历史记忆中加载出训练好的模型！')
+            final_answer += f'当前模型的性能表现为：\n{model_instance.model_performance}\n'
+            final_answer += model_instance._make_prediction()
+        else:
+            print(f'历史记忆中不存在相关模型，开始训练...')
+            model_instance = StockPredictionModel(start_date, end_date, target_stock_id, order_book_id_list)
+            model, performance = model_instance._train()
+            print('模型训练完成！')
+            model_instance._save_model(pack_save_path)
+            final_answer += model_instance._make_prediction()
+
+        return final_answer
 
 
 if __name__ == "__main__":
@@ -482,8 +540,8 @@ if __name__ == "__main__":
         # # 综合
         # '000025.XSHE', '000421.XSHE', '000523.XSHE', '000632.XSHE', '000652.XSHE'
     ]
-    model = StockPredictionModel(20250401, 20251128, cs_list)
-    model, outcoming = model._train()
+    rst = StockPredictionModel.runWholeProcedure(20250401, 20251128, '000049.XSHE', cs_list)
+    print(rst)
 
 
 

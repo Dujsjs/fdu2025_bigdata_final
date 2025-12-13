@@ -5,6 +5,8 @@ import asyncio
 from src.services.intent_recognition import intent_recognition
 from src.services.params_fetching import get_param_CSanalysis, get_param_ETFanalysis, get_param_INDXanalysis, get_param_FUTUREanalysis
 from src.services.ml_service import MLService
+from src.ml_models.StockPredictionModel import StockPredictionModel
+from src.core.load_config import settings
 
 async def main_async():
     # 1. 初始化 LLM 和 Embedding 模型 (保持不变)
@@ -33,7 +35,7 @@ async def main_async():
     # 4. 进入循环聊天
     print("\n--- AI 投资顾问启动成功 ---")
     print("输入 'exit' 或 'quit' 退出。")
-    print("您可以在下方的输入框中简要描述您的需求\n目前支持的金融产品有：股票、基金、指数、期货、期权\n支持的功能有：金融建模与收益预测、投资价值分析、金融知识查询")
+    print("您可以在下方的输入框中简要描述您的需求\n目前支持4大类金融产品：股票、基金、指数、期货\n支持的功能有：金融产品建模与评估（额外支持股票类的深度建模预测）、投资价值分析、金融知识与文档查询")
 
     while True:
         try:
@@ -61,7 +63,12 @@ async def main_async():
                                                         end_date=cs_params['end_date'],
                                                         target_stock_id=cs_params['target_stock_id'],
                                                         order_book_id_list=cs_params['order_book_id_list']))
-                        final_answer += cs_analysis+'\n'+'\n'
+                        cs_prediction_rst = StockPredictionModel.runWholeProcedure(cs_params['start_date'],
+                                                                                   cs_params['end_date'],
+                                                                                   cs_params['target_stock_id'],
+                                                                                   settings.mlModels.cs_list)
+                        final_answer += cs_analysis+'\n'+'\n'+cs_prediction_rst+'\n'+'\n'
+
                     elif user_query == 'ETF':
                         etf_params = get_param_ETFanalysis()
                         etf_analysis = str(ml_service.summarize_ETFanalysis(start_date=etf_params['start_date'],

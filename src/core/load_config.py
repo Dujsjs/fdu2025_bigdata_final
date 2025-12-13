@@ -53,6 +53,7 @@ class mlModelConfig(BaseModel):
     cv_fold: int
     cv_metric: str
     num_boost_rounds: int
+    cs_list: list
 
 class PathsConfig(BaseModel):
     raw_data: str
