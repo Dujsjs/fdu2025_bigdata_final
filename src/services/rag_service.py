@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from typing import Optional
-
+import hashlib
 from llama_index.core import (
     VectorStoreIndex,
     StorageContext,
@@ -42,10 +42,41 @@ class RAGService:
         os.makedirs(self.raw_data_path, exist_ok=True)
 
         # 初始化索引（加载或新建）
+        self._need_rebuild_index = self._judge_index_changes()   # 标识是否需要重新构建索引
         self._index = self._load_or_build_index()
 
         # 在初始化后自动检查并更新索引
         # self._auto_update_index()
+
+    def _judge_index_changes(self):
+        """
+        判断是否有新文件的加入，从而便于更新整体文件索引
+        """
+        addr = os.path.join(self.raw_data_path, 'file_name_hash.txt')
+        if os.path.exists(addr):
+            with open(addr, 'r', encoding='utf-8') as file:
+                content = str(file.read())
+        else:
+            content = ''
+
+        file_list = []
+        for root, dirs, files in os.walk(self.raw_data_path):
+            for file in files:
+                file_list.append(file)
+        if file_list:
+            if 'file_name_hash.txt' in file_list:
+                file_list.remove('file_name_hash.txt')
+            fileName_str = ",".join(sorted(file_list))
+            fileName_hash = hashlib.md5(fileName_str.encode('utf-8')).hexdigest()[:10]
+        else:
+            fileName_hash = hashlib.md5('None'.encode('utf-8')).hexdigest()[:10]
+
+        if content == fileName_hash:
+            return False
+        else:
+            with open(addr, 'w', encoding='utf-8') as file:
+                file.write(fileName_hash)
+            return True
 
     def _get_file_extractor_map(self):
         """
@@ -64,7 +95,7 @@ class RAGService:
         persist_path = Path(self.persist_dir)
 
         # 检查是否存在持久化目录且包含至少一个关键文件
-        if persist_path.exists() and any(persist_path.iterdir()):
+        if persist_path.exists() and any(persist_path.iterdir()) and (not self._need_rebuild_index):
             try:
                 # 正确方式：使用 from_defaults(persist_dir=...)
                 storage_context = StorageContext.from_defaults(persist_dir=str(persist_path))
@@ -75,9 +106,11 @@ class RAGService:
             except Exception as e:
                 print(f"加载索引失败: {e}，将重新构建...")
                 return self._build_index()
-
         else:
-            print("未找到持久化数据，开始构建新索引...")
+            if self._need_rebuild_index:
+                print("索引已经过时，正在更新...")
+            else:
+                print("未找到持久化数据，开始构建新索引...")
             return self._build_index()
 
     def _build_index(self) -> Optional[VectorStoreIndex]:
