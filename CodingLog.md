@@ -4,7 +4,7 @@
   * 运行`jupyter lab list`或`jupyter notebook list`查看地址+token
   * 打开pycharm设置中的jupyter servers，把地址+token输入到configured server栏目中
 * `a=df.groupby()`相当于一个view，每当df更新时，a的内容会自动更新
-* python进程结束后，显存不释放：执行`sudo kill -9 pgrep python`杀掉python进程
+* python进程结束后，显存不释放：执行`sudo kill -9 'pgrep python'`杀掉python进程
 
 
 
