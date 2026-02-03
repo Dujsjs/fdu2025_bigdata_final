@@ -1,1 +1,1 @@
-基于llama index设计的金融数据分析agent，通过解析自然语言指令，能够实现金融数据的自动获取、缓存，并基于此实现因子构建、建模和预测的全流程
+FinChat is an LlamaIndex-powered financial investment chatbot that combines RAG, time-series feature engineering, and LightGBM to deliver automated, scalable insights and natural-language investment reports from million-scale financial data.
